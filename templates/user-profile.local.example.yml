@@ -1,0 +1,68 @@
+# Local user profile for FindMyJob
+#
+# Copy this file to `.fmj/local-overrides/filefirst/user-profile.yml` and fill in
+# your own details. This file is local-only and ignored by Git.
+#
+# The public repo ships fictional tracked sample data. This local file is the
+# recommended place to put your real candidate information without editing
+# tracked files directly.
+
+candidate:
+  name: Your Name
+  email: you@example.com
+  phone: ""
+  location: City, State, Country
+  linkedin: ""
+  github: ""
+  website: ""
+  summary: ""
+  target_roles:
+    - Software Engineer
+
+targets:
+  title_keywords:
+    - software engineer
+    - backend engineer
+    - python engineer
+  locations:
+    - Remote - United States
+  countries:
+    - US
+  regions: []
+  cities: []
+  remote_only: true
+  employment_types:
+    - full-time
+  excluded_keywords:
+    - staff
+    - principal
+  blocked_companies: []
+  posted_within_days: 30
+
+authorization:
+  is_authorized: true
+  requires_future_sponsorship: false
+
+education:
+  - school: Sample University
+    degree: B.S.
+    field: Computer Science
+    graduation_date: ""
+    location: ""
+
+languages:
+  - name: English
+    fluency: Fluent
+
+resume:
+  markdown_path: ""
+  dossier_path: ""
+
+default_answers:
+  - question: Are you fluent in English?
+    answer: Yes, I am fluent in English.
+
+facts:
+  work: []
+  projects: []
+  skills: []

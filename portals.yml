@@ -1,0 +1,17 @@
+sources:
+  greenhouse:
+    enabled: true
+    boards: []
+    seed_urls: []
+    seed_domains: []
+  lever:
+    enabled: false
+    boards: []
+    seed_urls: []
+    seed_domains: []
+  ashby:
+    enabled: false
+    boards: []
+    seed_urls: []
+    seed_domains: []
+tracked_companies: []

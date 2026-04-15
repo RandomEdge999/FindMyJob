@@ -1,0 +1,64 @@
+candidate:
+  name: Jordan Mercer
+  email: jordan.mercer@example.com
+  phone: +1 555 010 2048
+  location: Austin, TX, US
+  linkedin: https://www.linkedin.com/in/jordan-mercer-sample
+  github: https://github.com/sample-jordan-mercer
+  website: https://portfolio.example.com/jordan-mercer
+  summary: Early-career software engineer focused on backend services, data workflows, and practical automation. Builds Python and JavaScript systems with strong testing, clean APIs, and operator-friendly tooling.
+  target_roles:
+  - swe_new_grad_core
+  - backend_platform
+  - fullstack_mobile
+  - ai_ml_data
+  - analyst_product
+targets:
+  title_keywords:
+  - engineer
+  - developer
+  - software
+  - backend
+  - fullstack
+  - data
+  - python
+  - platform
+  - analyst
+  locations: []
+  countries:
+  - US
+  regions: []
+  cities: []
+  remote_only: false
+  employment_types: []
+  excluded_keywords: []
+  blocked_companies: []
+  posted_within_days: 30
+runtime:
+  model:
+    provider: lmstudio
+    transport: local_http
+    base_url: http://127.0.0.1:1234/v1
+    api_key_env: null
+    model: auto
+    temperature: 0.2
+    max_tokens: 8192
+    preferred_context_window: 131072
+    local: true
+    command: []
+    working_dir: null
+  automation:
+    enabled: true
+    submit_enabled: false
+    default_submit_mode: preview_first
+    production_sources:
+    - greenhouse
+    ready_to_apply_threshold: 10
+    browser_mode: headed
+    browser_attach_enabled: false
+    browser_cdp_url: http://127.0.0.1:9222
+    max_open_tabs: 6
+    daily_submit_cap: 10
+    per_company_daily_cap: 2
+    capture_traces: false
+    capture_dom: false

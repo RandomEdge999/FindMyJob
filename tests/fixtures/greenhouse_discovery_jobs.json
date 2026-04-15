@@ -1,0 +1,25 @@
+{
+  "jobs": [
+    {
+      "id": 123456,
+      "title": "Software Engineer",
+      "absolute_url": "https://boards.greenhouse.io/acme/jobs/123456",
+      "content": "Build APIs and reliable backend systems for distributed teams. Applicants may apply with a resume and answer work authorization questions.",
+      "updated_at": "2026-03-31T15:30:00Z",
+      "metadata": {
+        "employment_type": "full_time"
+      },
+      "pay_input_ranges": [
+        {
+          "min_cents": 12000000,
+          "max_cents": 15000000,
+          "currency_type": "USD",
+          "pay_input_type": "yearly"
+        }
+      ],
+      "offices": [
+        {"name": "Remote - United States"}
+      ]
+    }
+  ]
+}

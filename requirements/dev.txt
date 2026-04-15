@@ -1,0 +1,4 @@
+# Canonical dependency metadata lives in pyproject.toml.
+# This file exists as a pip-friendly convenience export for public onboarding.
+
+-e .[dev]

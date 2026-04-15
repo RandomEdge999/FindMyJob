@@ -1,0 +1,53 @@
+{
+  "id": 123456,
+  "title": "Software Engineer",
+  "created_at": "2026-03-28T12:00:00Z",
+  "updated_at": "2026-03-31T15:30:00Z",
+  "content": "Build APIs and reliable backend systems for distributed teams.",
+  "location": {"name": "Remote - United States"},
+  "pay_input_ranges": [
+    {
+      "min_cents": 12000000,
+      "max_cents": 15000000,
+      "currency_type": "USD",
+      "pay_input_type": "yearly"
+    }
+  ],
+  "questions": [
+    {
+      "required": true,
+      "label": "Email Address",
+      "fields": [
+        {"name": "email", "type": "input_text", "required": true}
+      ]
+    },
+    {
+      "required": true,
+      "label": "Phone Number",
+      "fields": [
+        {"name": "phone", "type": "input_text", "required": true}
+      ]
+    },
+    {
+      "required": true,
+      "label": "Resume/CV",
+      "fields": [
+        {"name": "resume", "type": "input_file", "required": true, "accepted_mime_types": "application/pdf,.pdf"}
+      ]
+    },
+    {
+      "required": false,
+      "label": "Will you now or in the future require sponsorship for employment visa status?",
+      "fields": [
+        {"name": "requires_sponsorship", "type": "multi_value_single_select", "required": false}
+      ],
+      "answer_options": [
+        {"label": "Yes", "value": "yes"},
+        {"label": "No", "value": "no"}
+      ]
+    }
+  ],
+  "location_questions": [],
+  "compliance": [],
+  "demographic_questions": {"questions": []}
+}

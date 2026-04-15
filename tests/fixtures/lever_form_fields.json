@@ -1,0 +1,79 @@
+[
+  {
+    "tag": "input",
+    "type": "file",
+    "field_type": "file",
+    "widget_type": "file",
+    "name": "resume",
+    "required": true,
+    "label": "Resume/CV",
+    "accept": [".pdf", ".doc", ".docx"],
+    "source_snapshot_ref": "input:resume"
+  },
+  {
+    "tag": "input",
+    "type": "text",
+    "field_type": "text",
+    "widget_type": "text",
+    "name": "name",
+    "required": true,
+    "label": "Full name",
+    "source_snapshot_ref": "input:name"
+  },
+  {
+    "tag": "input",
+    "type": "email",
+    "field_type": "email",
+    "widget_type": "email",
+    "name": "email",
+    "required": true,
+    "label": "Email",
+    "source_snapshot_ref": "input:email"
+  },
+  {
+    "tag": "input",
+    "type": "tel",
+    "field_type": "tel",
+    "widget_type": "tel",
+    "name": "phone",
+    "required": false,
+    "label": "Phone",
+    "source_snapshot_ref": "input:phone"
+  },
+  {
+    "tag": "select",
+    "type": "",
+    "field_type": "select",
+    "widget_type": "select",
+    "name": "eeo[gender]",
+    "required": false,
+    "label": "Gender",
+    "option_label": "Prefer not to say",
+    "option_value": "decline",
+    "source_snapshot_ref": "select:eeo[gender]"
+  },
+  {
+    "tag": "input",
+    "type": "radio",
+    "field_type": "radio",
+    "widget_type": "radio_group",
+    "name": "surveysResponses[sponsorship]",
+    "required": false,
+    "label": "Will you require sponsorship now or in the future?",
+    "option_label": "Yes",
+    "option_value": "yes",
+    "source_snapshot_ref": "radio:surveysResponses[sponsorship]"
+  },
+  {
+    "tag": "input",
+    "type": "radio",
+    "field_type": "radio",
+    "widget_type": "radio_group",
+    "name": "surveysResponses[sponsorship]",
+    "required": false,
+    "label": "Will you require sponsorship now or in the future?",
+    "option_label": "No",
+    "option_value": "no",
+    "source_snapshot_ref": "radio:surveysResponses[sponsorship]"
+  }
+]
