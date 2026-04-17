@@ -61,3 +61,5 @@ web_*.log
 
 .claude
 .tools/
+\n+# Vulture allowlist
+scripts/vulture_allowlist.py
