@@ -40,6 +40,8 @@ dev = [
   "build>=1.2.2",
   "pytest>=8.3.2",
   "pytest-asyncio>=0.23.8",
+  "ruff>=0.11.0",
+  "vulture>=2.14",
 ]
 models = [
   "litellm>=1.43.0",
@@ -83,3 +85,53 @@ testpaths = ["tests"]
 markers = [
   "timeout(seconds): mark a test with an execution timeout budget",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = [
+  "frontend",
+  "src/findmyjob/web/frontend_dist",
+]
+
+[tool.ruff.lint]
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/env.py" = ["F401"]
+"src/findmyjob/core/runtime.py" = ["F401"]
+
+[tool.vulture]
+paths = ["src/findmyjob", "scripts/vulture_allowlist.py"]
+exclude = ["alembic", "frontend", "src/findmyjob/web/frontend_dist", "tests"]
+ignore_decorators = [
+  "@app.command",
+  "@config_app.command",
+  "@models_app.command",
+  "@profile_app.command",
+  "@discover_app.command",
+  "@prepare_app.command",
+  "@apply_app.command",
+  "@jobs_app.command",
+  "@searches_app.command",
+  "@review_app.command",
+  "@onboard_app.command",
+  "@personal_app.command",
+  "@personal_prefs_app.command",
+  "@personal_facts_app.command",
+  "@personal_preview_app.command",
+  "@support_app.command",
+  "@ledger_app.command",
+  "@runs_app.command",
+  "@sources_app.command",
+  "@greenhouse_app.command",
+  "@auto_app.command",
+  "@questions_app.command",
+  "@boards_app.command",
+  "@db_app.command",
+  "@workflow_app.command",
+  "@screen_app.command",
+  "@chatgpt_app.command",
+]
+min_confidence = 80
+sort_by_size = true
