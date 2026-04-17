@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -162,7 +161,6 @@ async def generate_training_draft(
 def _format_profile_facts(runtime) -> str:
     """Format profile facts into a text block for the drafter prompt."""
     from findmyjob.db.repositories import ProfileRepository
-    from findmyjob.db.models import ProfileFactRecord
 
     with runtime.session_scope() as session:
         repo = ProfileRepository(session)

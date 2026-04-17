@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import functools
 from typing import Any, Callable, TypeVar
 
 import anyio

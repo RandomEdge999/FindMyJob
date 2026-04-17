@@ -25,7 +25,6 @@ from findmyjob.core.env import load_workspace_dotenv
 from findmyjob.core.lmstudio import (
     LMSTUDIO_AUTO_MODEL,
     LMSTUDIO_DEFAULT_HOST,
-    LMSTUDIO_DEFAULT_SCREENING_MODEL,
     LMSTUDIO_DEFAULT_WRITER_MODEL,
     LMSTUDIO_PROVIDER,
 )

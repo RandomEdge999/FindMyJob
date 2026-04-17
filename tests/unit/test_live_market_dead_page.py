@@ -1,12 +1,9 @@
 ﻿from __future__ import annotations
 
 import shutil
-import tempfile
 from pathlib import Path
 
 import anyio
-import pytest
-
 from findmyjob.filefirst.live_market import SeedDiscovery, discover_live_market
 from findmyjob.filefirst.models import FileFact
 from findmyjob.filefirst.workspace import FileWorkspace

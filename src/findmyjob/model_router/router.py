@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 log = logging.getLogger("findmyjob.model_router")
 

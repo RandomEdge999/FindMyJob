@@ -13,11 +13,15 @@ import shutil
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
-    from playwright.async_api import Browser, BrowserContext, Page
+    from playwright.async_api import Browser as _Browser
+    from playwright.async_api import BrowserContext as _BrowserContext
+    from playwright.async_api import Page as _Page
+else:
+    _Browser = _BrowserContext = _Page = Any
 
 
 _DEFAULT_CDP_URL = "http://127.0.0.1:9222"
@@ -28,7 +32,7 @@ class CDPAttachError(RuntimeError):
     """Raised when CDP attachment fails."""
 
 
-def _stable_page_id(page: "Page") -> str:
+def _stable_page_id(page: _Page) -> str:
     return str(id(page))
 
 
@@ -38,7 +42,7 @@ def _normalize_url(value: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-def _context_for_my_greenhouse(browser: "Browser") -> "BrowserContext":
+def _context_for_my_greenhouse(browser: _Browser) -> _BrowserContext:
     if not browser.contexts:
         raise CDPAttachError(
             "Attached Chrome did not expose any browser contexts. "
@@ -56,7 +60,7 @@ async def cdp_browser_context(
     cdp_url: str = _DEFAULT_CDP_URL,
     *,
     keep_tabs_open: bool = False,
-) -> AsyncIterator[tuple["Browser", "BrowserContext"]]:
+) -> AsyncIterator[tuple[_Browser, _BrowserContext]]:
     """Connect to an existing Chrome over CDP and yield ``(browser, context)``.
 
     This never falls back to launching isolated Chromium. Cleanup only
@@ -97,9 +101,9 @@ async def cdp_browser_context(
 
 
 async def find_or_open_tab(
-    context: "BrowserContext",
+    context: _BrowserContext,
     target_url: str = _MY_GREENHOUSE_JOBS_URL,
-) -> "Page":
+) -> _Page:
     """Reuse an existing tab for *target_url* when possible, otherwise open one."""
     normalized_target = _normalize_url(target_url)
     for page in context.pages:

@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from findmyjob.core.enums import ArtifactKind
-from findmyjob.core.types import ArtifactBinding, FormFieldBinding, NormalizedJobPosting, SourceCapabilities, SubmissionCapturePolicy, SubmissionPlan, SubmissionResult
+from findmyjob.core.types import FormFieldBinding, NormalizedJobPosting, SourceCapabilities, SubmissionCapturePolicy, SubmissionPlan, SubmissionResult
 from findmyjob.sources.contracts import DiscoveryQuery, ExtractionResult
 
 

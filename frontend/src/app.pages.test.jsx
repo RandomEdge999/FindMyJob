@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BrowserRouter } from 'react-router-dom'
 
-import { App, AutopilotPage, DashboardPage, ReviewPage, RunsPage, SettingsPage, SetupPage, deriveOperatorState } from './app.jsx'
+import { App, AutopilotPage, DashboardPage, ReviewPage, SettingsPage, deriveOperatorState } from './app.jsx'
 
 
 function buildOperator() {
@@ -242,6 +242,7 @@ describe('console pages', () => {
     await screen.findByText('Overview And Health')
     expect(screen.getByRole('link', { name: 'Open Autopilot' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Open Review' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Run History/i }))
     expect(screen.getByText('run-001')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Discover Jobs' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Full Run' })).toBeNull()
@@ -250,6 +251,9 @@ describe('console pages', () => {
 
   it('setup compatibility view lands on settings readiness and resets operational state', async () => {
     const { calls } = installFetchMock(async ({ url, method }) => {
+      if (url === '/api/live/status?limit=60') {
+        return { state: { run_type: 'idle', status: 'idle', stage: 'idle', latest_operator_message: 'No active run.' }, events: [] }
+      }
       if (url === '/api/settings') return createSettingsPayload()
       if (url.startsWith('/api/settings/models/available')) {
         return { models: [{ id: 'runtime-qwen', label: 'runtime-qwen' }], count: 1, source: 'lmstudio', note: '1 models available from lmstudio.' }
@@ -279,8 +283,10 @@ describe('console pages', () => {
       return null
     })
 
-    render(<SetupPage />)
+    renderWithRouter(<App />, '/setup')
 
+    await screen.findByText('Configuration')
+    fireEvent.click(screen.getByRole('button', { name: /Readiness & Workspace Health/i }))
     await screen.findByText('Workspace Readiness')
     await screen.findByText('Profile Mode')
     await screen.findByText('.fmj/local-overrides/filefirst/user-profile.yml')
@@ -309,15 +315,16 @@ describe('console pages', () => {
       return null
     })
 
-    render(<SettingsPage />)
+    renderWithRouter(<SettingsPage />)
 
     await screen.findByText('Configuration')
-    expect(screen.getByDisplayValue('greenhouse')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Sources & Discovery/i }))
+    expect(screen.getByText('Greenhouse')).toBeTruthy()
 
-    const greenhouseCard = screen.getByText('Greenhouse').closest('article')
-    const leverCard = screen.getByText('Lever').closest('article')
-    const greenhouseBoards = within(greenhouseCard).getAllByRole('textbox')[0]
-    const leverToggle = within(leverCard).getByRole('checkbox')
+    let greenhouseCard = screen.getByText('Greenhouse').closest('article')
+    let leverCard = screen.getByText('Lever').closest('article')
+    let greenhouseBoards = within(greenhouseCard).getAllByRole('textbox')[0]
+    let leverToggle = within(leverCard).getByRole('checkbox')
 
     fireEvent.change(greenhouseBoards, { target: { value: 'acme\nmanual-board' } })
     fireEvent.click(leverToggle)
@@ -337,14 +344,22 @@ describe('console pages', () => {
       },
     })
 
+    fireEvent.click(screen.getByRole('button', { name: /Automation & Runtime/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Ping Runtime' }))
 
     await waitFor(() => {
       expect(calls.some((call) => call.url === '/api/settings/models/ping' && call.method === 'POST')).toBe(true)
       expect(screen.getByDisplayValue('greenhouse, lever')).toBeTruthy()
-      expect(within(greenhouseCard).getAllByRole('textbox')[0].value).toBe('acme\nmanual-board')
-      expect(within(leverCard).getByRole('checkbox').checked).toBe(true)
     })
+
+    fireEvent.click(screen.getByRole('button', { name: /Sources & Discovery/i }))
+    greenhouseCard = screen.getByText('Greenhouse').closest('article')
+    leverCard = screen.getByText('Lever').closest('article')
+    greenhouseBoards = within(greenhouseCard).getAllByRole('textbox')[0]
+    leverToggle = within(leverCard).getByRole('checkbox')
+
+    expect(greenhouseBoards.value).toBe('acme\nmanual-board')
+    expect(leverToggle.checked).toBe(true)
 
     fireEvent.click(screen.getByRole('button', { name: 'Save Portals' }))
     await waitFor(() => {
@@ -375,9 +390,10 @@ describe('console pages', () => {
       return { saved: true }
     })
 
-    render(<SettingsPage />)
+    renderWithRouter(<SettingsPage />)
 
     await screen.findByText('Configuration')
+    fireEvent.click(screen.getByRole('button', { name: /Automation & Runtime/i }))
     fireEvent.click(screen.getByRole('button', { name: 'Ping Runtime' }))
 
     await waitFor(() => {
@@ -794,6 +810,7 @@ describe('console pages', () => {
     expect(screen.getByRole('link', { name: 'Autopilot' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Review' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Settings' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Run History/i }))
     expect(screen.getByText('run-001')).toBeTruthy()
     expect(screen.getByText(/submitted 2 \/ failed 1/)).toBeTruthy()
   })

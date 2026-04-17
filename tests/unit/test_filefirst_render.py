@@ -1,9 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from findmyjob.core.enums import FactKind, Sensitivity, WorkplaceType
-from findmyjob.core.types import NormalizedJobPosting, ProfileFact
 from findmyjob.documents.pipeline import RenderedArtifact
 from findmyjob.filefirst.models import ApplicationEntry, EvaluationResult, FileFact, InboxJob
 from findmyjob.filefirst.render import _compact_job_for_llm, _cover_letter_paragraphs, build_pdf_for_target
@@ -148,7 +144,7 @@ def test_build_pdf_for_target_latex_direct_skips_json_drafting_writer(monkeypatc
             RenderedArtifact(kind='cover_letter', path=cover_txt, content_hash='cover-text', validation_results={'valid': True}),
         ]
 
-    monkeypatch.setattr('findmyjob.filefirst.render.build_resume_plan_with_router', fail_if_called)
+    monkeypatch.setattr('findmyjob.filefirst.drafting.build_resume_plan_with_router', fail_if_called)
     monkeypatch.setattr(
         'findmyjob.filefirst.render._template_bridge_details',
         lambda workspace: {

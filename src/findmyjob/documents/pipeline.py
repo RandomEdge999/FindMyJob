@@ -1347,7 +1347,6 @@ class DocumentPipeline:
         work = context['profile'].get('work', [])
         projects = context['profile'].get('projects', [])
         skills = context['profile'].get('skills', [])
-        draft = context.get('resume_draft') or {}
 
         def esc(value: Any) -> str:
             return _latex_escape(value)

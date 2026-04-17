@@ -4,12 +4,10 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from findmyjob.core.enums import ModelRole
 from findmyjob.core.lmstudio import LMSTUDIO_DEFAULT_HOST, LMSTUDIO_PROVIDER, probe_lmstudio_base_url
 from findmyjob.web.service import OperatorConsoleService
 

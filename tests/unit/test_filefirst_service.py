@@ -632,7 +632,7 @@ def test_grounding_facts_include_candidate_location_when_profile_facts_do_not(tm
 
     answer = anyio.run(_answer)
 
-    assert answer.answer == 'Tennessee'
+    assert answer.answer == 'Texas'
     location_fact = next(fact for fact in facts if getattr(fact.kind, 'value', fact.kind) == 'location')
     assert location_fact.payload['city'] == 'Austin'
     assert location_fact.payload['region_code'] == 'TX'
@@ -844,7 +844,6 @@ def test_run_autonomous_persists_run_history_without_sqlite(monkeypatch, tmp_pat
         return record
 
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._run_discovery_scan', fake_scan)
-    monkeypatch.setattr('findmyjob.filefirst.service.run_pipeline', lambda workspace: {'processed': 1, 'evaluated': [{'application_id': '001', 'job_id': 'job-100'}], 'pdfs': []})
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._prepare_submission_async', fake_prepare)
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._browser_runtime_blocker', lambda self: None)
     # Patch _continue_after_ready (called synchronously, returns result of _submit_application_async)
@@ -1862,7 +1861,7 @@ def test_run_autonomous_does_not_loop_on_blocked_application(monkeypatch, tmp_pa
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._run_discovery_scan', fake_discovery_scan)
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._prepare_submission_async', fake_prepare)
 
-    result = service.run_autonomous()
+    service.run_autonomous()
 
     assert call_counter['discovery'] == 0
 

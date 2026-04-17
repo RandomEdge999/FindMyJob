@@ -16,18 +16,15 @@ from findmyjob.core.enums import ApplicationMode, CompanySizeBucket, PersonalTri
 from findmyjob.core.runtime import AppRuntime
 from findmyjob.core.types import (
     GreenhouseBenchmarkSummary,
-    JobSearchQuery,
     LaunchCheckReport,
     ModelLaunchProfileReport,
     ModelLaunchRoleStatus,
     ReleaseSnapshotReport,
-    SavedSearch,
     SmokeTestResult,
     ValidationReport,
 )
 from findmyjob.db.board_repository import BoardRepository
 from findmyjob.db.repositories import JobRepository, PersonalTriageRepository, RunRepository
-from findmyjob.orchestrator.service import Orchestrator
 from findmyjob.sources.normalizer import build_normalized_job
 from findmyjob.tui.app import FindMyJobApp
 from findmyjob.core.types import BoardRegistry
@@ -223,7 +220,7 @@ async def test_tui_dashboard_shows_personal_inbox_summary(monkeypatch, tmp_path:
     )
 
     app = FindMyJobApp(tmp_path)
-    async with app.run_test() as pilot:
+    async with app.run_test():
         assert 'Personal Inbox: shortlist=0 | watching=0 | new=1 | review=1 | needs_input=1 | approved=1' in app.dashboard_view.summary_text
         assert app.dashboard_view.personal_table.row_count == 4
 

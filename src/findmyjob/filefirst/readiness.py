@@ -580,7 +580,6 @@ def inspect_filefirst_launch_acceptance(
 
     automation = ws.load_profile().runtime.automation
     submit_active = bool(automation.submit_enabled and automation.default_submit_mode == "auto_submit")
-    portals = ws.load_portals()
     requested_sources = _requested_production_sources(ws)
     production_sources = [source_name for source_name in requested_sources if source_name in _SUPPORTED_SOURCES]
     enabled_sources = _enabled_sources(ws)

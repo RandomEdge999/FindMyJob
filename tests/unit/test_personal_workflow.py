@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-import anyio
 import pytest
 
 from findmyjob.core.enums import ApplicationMode, ExperienceLevel, FactKind, JobLifecycleStatus, PersonalSuppressionScope, PersonalTriageStatus, ReviewStatus, RunStatus, Sensitivity, SponsorshipFit, SponsorshipSignal, WorkplaceType

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from findmyjob.documents.pipeline import DocumentPipeline
 from findmyjob.filefirst.evaluate import _resolve_target, evaluate_target, run_pipeline
-from findmyjob.filefirst.models import ApplicationEntry, EvaluationResult, FileFact, InboxJob, ResumePlan
+from findmyjob.filefirst.models import FileFact, InboxJob, ResumePlan
 from findmyjob.filefirst.workspace import FileWorkspace
 
 
@@ -198,7 +198,7 @@ def test_run_pipeline_generates_pdf_and_updates_tracker(monkeypatch, tmp_path) -
 
     monkeypatch.setattr('findmyjob.filefirst.modes.ModeRunner.run_json', _fake_mode_json)
     monkeypatch.setattr(
-        'findmyjob.filefirst.render.build_resume_plan_with_router',
+        'findmyjob.filefirst.drafting.build_resume_plan_with_router',
         lambda ws, job, evaluation: (
             ResumePlan(
                 headline='Backend engineer for local inference',
@@ -211,6 +211,18 @@ def test_run_pipeline_generates_pdf_and_updates_tracker(monkeypatch, tmp_path) -
             ),
             {'writer_profile': 'test-writer', 'validation_profile': 'deterministic_validation', 'validation_issues': [], 'repair_attempted': False, 'repair_writer_profile': None, 'verified': True, 'adaptation_summary': '', 'signature_name': 'Test User', 'salutation': 'Dear Hiring Team,', 'closing': 'Sincerely,'},
         ),
+    )
+    monkeypatch.setattr(
+        'findmyjob.filefirst.render._template_bridge_details',
+        lambda workspace: {
+            'requested': False,
+            'configured': True,
+            'resume_renderer': 'typst',
+            'resume_template_path': None,
+            'cover_letter_template_path': None,
+            'missing_resume_template': False,
+            'chatgpt_drafting': {},
+        },
     )
 
     def _fake_build_application_artifacts(self, job, facts, artifact_draft=None):

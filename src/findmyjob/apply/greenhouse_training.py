@@ -8,7 +8,10 @@ from urllib.parse import urljoin, urlsplit
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from playwright.async_api import Locator, Page
+    from playwright.async_api import Locator as _Locator
+    from playwright.async_api import Page as _Page
+else:
+    _Locator = _Page = Any
 
 from findmyjob.core.types import TrainingPageCapture
 
@@ -68,15 +71,15 @@ class GreenhousePageModelError(RuntimeError):
     """Raised for navigation or extraction failures on the My Greenhouse page."""
 
 
-def _stable_page_id(page: "Page") -> str:
+def _stable_page_id(page: _Page) -> str:
     return str(id(page))
 
 
-def _current_url(page_or_url: "Page | str") -> str:
+def _current_url(page_or_url: _Page | str) -> str:
     return page_or_url if isinstance(page_or_url, str) else page_or_url.url
 
 
-def _resolve_page_url(page_or_url: "Page | str", href: str | None) -> str | None:
+def _resolve_page_url(page_or_url: _Page | str, href: str | None) -> str | None:
     if not href:
         return None
     candidate = str(href).strip()
@@ -87,16 +90,16 @@ def _resolve_page_url(page_or_url: "Page | str", href: str | None) -> str | None
     return urljoin(_current_url(page_or_url), candidate)
 
 
-def _page_host(page: "Page") -> str:
+def _page_host(page: _Page) -> str:
     return urlsplit(page.url).netloc.casefold()
 
 
-async def _job_rows(page: "Page"):
+async def _job_rows(page: _Page):
     rows = page.locator(_PRIMARY_JOB_ROW_SELECTOR)
     return rows if await _safe_count(rows) > 0 else page.locator(_FALLBACK_JOB_ROW_SELECTOR)
 
 
-async def _safe_count(locator: "Locator") -> int:
+async def _safe_count(locator: _Locator) -> int:
     try:
         return await locator.count()
     except Exception:
@@ -111,7 +114,7 @@ async def _find_first_locator(container: Any, selectors: tuple[str, ...]):
     return None
 
 
-def _page_context(page: "Page"):
+def _page_context(page: _Page):
     context = getattr(page, "context", None)
     if callable(context):
         try:
@@ -121,7 +124,7 @@ def _page_context(page: "Page"):
     return context
 
 
-async def _wait_for_page(page: "Page") -> None:
+async def _wait_for_page(page: _Page) -> None:
     try:
         await page.wait_for_load_state("networkidle", timeout=10_000)
     except Exception:
@@ -131,7 +134,7 @@ async def _wait_for_page(page: "Page") -> None:
             pass
 
 
-async def _click_and_follow(page: "Page", control) -> "Page":
+async def _click_and_follow(page: _Page, control) -> _Page:
     context = _page_context(page)
     existing_ids = {_stable_page_id(candidate) for candidate in getattr(context, "pages", [])} if context is not None else set()
     await control.click()
@@ -165,7 +168,7 @@ def _split_row_text(text: str, title_text: str | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-async def set_posted_window(page: "Page", days: int) -> None:
+async def set_posted_window(page: _Page, days: int) -> None:
     if days not in VALID_POSTED_WINDOWS:
         raise ValueError(f"posted_window must be one of {VALID_POSTED_WINDOWS}, got {days}")
 
@@ -198,7 +201,7 @@ async def set_posted_window(page: "Page", days: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def harvest_visible_jobs(page: "Page", max_jobs: int = 50) -> list[dict[str, Any]]:
+async def harvest_visible_jobs(page: _Page, max_jobs: int = 50) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
     rows = await _job_rows(page)
     count = await _safe_count(rows)
@@ -251,7 +254,7 @@ async def harvest_visible_jobs(page: "Page", max_jobs: int = 50) -> list[dict[st
 # ---------------------------------------------------------------------------
 
 
-async def _find_matching_job_row(page: "Page", job_ref: dict[str, Any]):
+async def _find_matching_job_row(page: _Page, job_ref: dict[str, Any]):
     rows = await _job_rows(page)
     count = await _safe_count(rows)
     expected_title = str(job_ref.get("title") or "").strip().casefold()
@@ -268,7 +271,7 @@ async def _find_matching_job_row(page: "Page", job_ref: dict[str, Any]):
     raise GreenhousePageModelError("Could not relocate the selected job row on the My Greenhouse jobs list.")
 
 
-async def open_job_view(page: "Page", job_ref: str | dict[str, Any]) -> tuple["Page", TrainingPageCapture]:
+async def open_job_view(page: _Page, job_ref: str | dict[str, Any]) -> tuple[_Page, TrainingPageCapture]:
     notes: list[str] = []
     target_page = page
     if isinstance(job_ref, str):
@@ -290,12 +293,12 @@ async def open_job_view(page: "Page", job_ref: str | dict[str, Any]) -> tuple["P
     return target_page, TrainingPageCapture(stage="job_view", url=target_page.url, page_title=await target_page.title(), layout_notes=notes)
 
 
-async def navigate_to_job_view(page: "Page", job_ref: str | dict[str, Any]) -> TrainingPageCapture:
+async def navigate_to_job_view(page: _Page, job_ref: str | dict[str, Any]) -> TrainingPageCapture:
     _page, capture = await open_job_view(page, job_ref)
     return capture
 
 
-async def find_company_job_page_url(page: "Page") -> str | None:
+async def find_company_job_page_url(page: _Page) -> str | None:
     for selector in _COMPANY_PAGE_SELECTORS:
         locator = page.locator(selector)
         if await _safe_count(locator) == 0:
@@ -310,7 +313,7 @@ async def find_company_job_page_url(page: "Page") -> str | None:
     return None
 
 
-async def open_company_job_page(page: "Page", company_target: str) -> tuple["Page", TrainingPageCapture]:
+async def open_company_job_page(page: _Page, company_target: str) -> tuple[_Page, TrainingPageCapture]:
     notes: list[str] = []
     target_page = page
     if company_target == JS_COMPANY_PAGE_ACTION:
@@ -328,12 +331,12 @@ async def open_company_job_page(page: "Page", company_target: str) -> tuple["Pag
     return target_page, TrainingPageCapture(stage="company_page", url=target_page.url, page_title=await target_page.title(), layout_notes=notes)
 
 
-async def navigate_to_company_job_page(page: "Page", company_target: str) -> TrainingPageCapture:
+async def navigate_to_company_job_page(page: _Page, company_target: str) -> TrainingPageCapture:
     _page, capture = await open_company_job_page(page, company_target)
     return capture
 
 
-async def find_apply_url(page: "Page") -> str | None:
+async def find_apply_url(page: _Page) -> str | None:
     for selector in _APPLY_LINK_SELECTORS:
         locator = page.locator(selector)
         if await _safe_count(locator) == 0:
@@ -349,7 +352,7 @@ async def find_apply_url(page: "Page") -> str | None:
     return None
 
 
-async def open_apply_page(page: "Page", apply_target: str) -> tuple["Page", TrainingPageCapture]:
+async def open_apply_page(page: _Page, apply_target: str) -> tuple[_Page, TrainingPageCapture]:
     notes: list[str] = []
     target_page = page
     if apply_target == JS_APPLY_ACTION:
@@ -367,7 +370,7 @@ async def open_apply_page(page: "Page", apply_target: str) -> tuple["Page", Trai
     return target_page, TrainingPageCapture(stage="apply_page", url=target_page.url, page_title=await target_page.title(), layout_notes=notes)
 
 
-async def navigate_to_apply(page: "Page", apply_target: str) -> TrainingPageCapture:
+async def navigate_to_apply(page: _Page, apply_target: str) -> TrainingPageCapture:
     _page, capture = await open_apply_page(page, apply_target)
     return capture
 
@@ -377,7 +380,7 @@ async def navigate_to_apply(page: "Page", apply_target: str) -> TrainingPageCapt
 # ---------------------------------------------------------------------------
 
 
-async def extract_form_fields(page: "Page") -> list[dict[str, Any]]:
+async def extract_form_fields(page: _Page) -> list[dict[str, Any]]:
     fields: list[dict[str, Any]] = []
     inputs = page.locator(
         "input:not([type='hidden']):not([type='submit']), textarea, select, input[type='file']"
@@ -427,7 +430,7 @@ async def extract_form_fields(page: "Page") -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-async def capture_screenshot(page: "Page", output_dir: Path, prefix: str = "training") -> Path:
+async def capture_screenshot(page: _Page, output_dir: Path, prefix: str = "training") -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = output_dir / f"{prefix}_{ts}_{uuid4().hex[:8]}.png"
@@ -435,7 +438,7 @@ async def capture_screenshot(page: "Page", output_dir: Path, prefix: str = "trai
     return path
 
 
-async def capture_dom_snapshot(page: "Page", output_dir: Path, prefix: str = "training") -> Path:
+async def capture_dom_snapshot(page: _Page, output_dir: Path, prefix: str = "training") -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = output_dir / f"{prefix}_{ts}_{uuid4().hex[:8]}.html"
@@ -443,7 +446,7 @@ async def capture_dom_snapshot(page: "Page", output_dir: Path, prefix: str = "tr
     return path
 
 
-async def extract_job_description(page: "Page") -> str:
+async def extract_job_description(page: _Page) -> str:
     selectors = [
         "[class*='job-description']",
         "[class*='job_description']",
@@ -468,7 +471,7 @@ async def extract_job_description(page: "Page") -> str:
 
 
 async def inspect_training_job_path(
-    page: "Page",
+    page: _Page,
     job_ref: str | dict[str, Any],
     output_dir: Path,
 ) -> dict[str, Any]:

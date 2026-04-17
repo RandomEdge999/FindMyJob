@@ -14,8 +14,6 @@ from findmyjob.core.enums import ModelRole
 from findmyjob.core.lmstudio import (
     LMSTUDIO_AUTO_MODEL,
     LMSTUDIO_DEFAULT_HOST,
-    LMSTUDIO_DEFAULT_SCREENING_MODEL,
-    LMSTUDIO_DEFAULT_WRITER_MODEL,
     LMSTUDIO_PROVIDER,
     probe_lmstudio_base_url,
     resolve_lmstudio_model_id_or_default,

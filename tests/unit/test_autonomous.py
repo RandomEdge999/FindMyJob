@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import anyio
@@ -9,9 +8,9 @@ import pytest
 from typer.testing import CliRunner
 
 from findmyjob.cli.main import app
-from findmyjob.core.enums import ApplicationMode, FactKind, JobLifecycleStatus, ModelRole, QuestionType, ReviewStatus, Sensitivity, VerificationStatus
+from findmyjob.core.enums import ApplicationMode, FactKind, JobLifecycleStatus, ModelRole, QuestionType, ReviewStatus, Sensitivity
 from findmyjob.core.runtime import AppRuntime
-from findmyjob.core.types import ApplicationQuestion, GroundedAnswer, ModelProfile, ProfileFact
+from findmyjob.core.types import ApplicationQuestion, ModelProfile, ProfileFact
 from findmyjob.filefirst.models import ApplicationEntry, BoardDiscoveryState, EvaluationResult, FileFact, InboxJob, RunRecord, SubmissionRecord
 from findmyjob.filefirst.workspace import FileWorkspace
 from findmyjob.db.repositories import ApplicationRepository, AuditRepository, JobRepository, ProfileRepository, RunRepository

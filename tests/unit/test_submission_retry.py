@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from findmyjob.apply.browser import classify_submission_failure, analyze_dom_snapshot
 from findmyjob.core.types import SubmissionEvidence
 

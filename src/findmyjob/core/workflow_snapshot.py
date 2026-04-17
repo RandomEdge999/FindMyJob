@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from findmyjob.core.runtime import (
     AppRuntime,
     collect_release_snapshot,
-    collect_support_bundle,
     inspect_personal_rehearsal,
 )
 from findmyjob.core.types import (
@@ -25,7 +24,6 @@ from findmyjob.core.types import (
     ReleaseSnapshotReport,
     TrainingRunSummary,
 )
-from findmyjob.personal.training import build_training_report
 
 
 class WorkflowSnapshot(BaseModel):

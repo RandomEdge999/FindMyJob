@@ -4,16 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import httpx
-from tenacity import (
-    RetryError,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
 log = logging.getLogger("findmyjob.retry")
 

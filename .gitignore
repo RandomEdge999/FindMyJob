@@ -13,6 +13,7 @@ build/
 *.db-shm
 *.db-wal
 my_personal_information/
+profile/
 .fmj/local_profile/
 .fmj/local_templates/
 .fmj/onboarding/

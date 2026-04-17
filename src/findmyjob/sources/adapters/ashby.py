@@ -8,7 +8,7 @@ import httpx
 
 from findmyjob.apply.browser import PlaywrightSubmitter
 from findmyjob.apply.forms import extract_questions_from_html, extract_questions_from_lever_fields, merge_extraction_results
-from findmyjob.core.enums import ArtifactKind, PolicyMode, QuestionType, SourceKind, SourceRisk
+from findmyjob.core.enums import PolicyMode, QuestionType, SourceKind, SourceRisk
 from findmyjob.core.filtering import evaluate_job_against_query
 from findmyjob.core.retry import http_get_with_retry, http_post_with_retry
 from findmyjob.core.types import ArtifactBinding, FormFieldBinding, NormalizedJobPosting, SourceCapabilities, SubmissionCapturePolicy, SubmissionPlan, SubmissionResult

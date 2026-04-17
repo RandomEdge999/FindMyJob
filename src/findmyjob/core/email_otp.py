@@ -261,7 +261,6 @@ def _extract_greenhouse_application_receipt(
         return None
     subject = _decoded_header_text(message, "subject")
     body = _message_body(message)
-    lowered_subject = subject.casefold()
     lowered_body = body.casefold()
     if not (
         _GREENHOUSE_RECEIPT_SUBJECT_PATTERN.search(subject)

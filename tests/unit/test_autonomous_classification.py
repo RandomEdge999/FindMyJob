@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from findmyjob.personal.autonomous import _hard_gate_reasons, _update_autonomous_notes
 from findmyjob.sources.classification import AutomationTier, BoardClassification, BoardFamily
 

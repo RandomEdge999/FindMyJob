@@ -4,7 +4,7 @@ import json
 import random
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from typing import Any
 
 import logging
 import anyio
@@ -18,7 +18,6 @@ from findmyjob.core.enums import (
     ArtifactKind,
     JobLifecycleStatus,
     ModelRole,
-    QuestionType,
     ReviewStatus,
     RunStatus,
     VerificationStatus,
@@ -54,7 +53,6 @@ from findmyjob.ledger.export import export_ledger
 from findmyjob.orchestrator.greenhouse import GreenhouseScaleOrchestrator
 from findmyjob.orchestrator.service import Orchestrator
 from findmyjob.sources.classification import (
-    AutomationTier,
     BoardClassification,
     classify_job,
     is_auto_submittable,
@@ -192,7 +190,6 @@ def list_question_queue(runtime) -> list[QueuedQuestionSummary]:
             if job is None:
                 continue
             for question_record, answer_record in app_repo.list_answers_for_application(application.id):
-                app_question = _question_model(question_record)
                 if ApplicationService._question_hidden_from_operator(question_record):
                     continue
                 if answer_record is not None and not answer_record.needs_user_input and answer_record.candidate_answer:

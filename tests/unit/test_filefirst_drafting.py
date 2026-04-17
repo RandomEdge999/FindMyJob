@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from findmyjob.filefirst.drafting import build_resume_plan_with_router
 from findmyjob.filefirst.models import EvaluationResult, FileFact, InboxJob
 from findmyjob.filefirst.workspace import FileWorkspace

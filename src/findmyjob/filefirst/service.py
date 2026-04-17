@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
-import anyio
 import httpx
 
 from findmyjob.apply.browser import PlaywrightSubmitter
@@ -34,10 +33,10 @@ from findmyjob.core.enums import FactKind, JobLifecycleStatus, ModelRole, Sensit
 from findmyjob.core.types import ApplicationQuestion, FormFieldBinding, GroundedAnswer, ModelProfile, ProfileFact, SubmissionEvidence, SubmissionPlan
 from findmyjob.filefirst.advanced_models import advanced_models_payload, delete_workspace_model_profile, install_recommended_split_profiles, load_model_router, save_workspace_model_profile
 from findmyjob.filefirst.dossier import candidate_dossier_metadata, regenerate_candidate_dossier
-from findmyjob.filefirst.evaluate import evaluate_target, run_pipeline
+from findmyjob.filefirst.evaluate import evaluate_target
 from findmyjob.filefirst.chatgpt_drafting import ChatGPTDraftingService
 from findmyjob.filefirst.live_market import discover_live_market
-from findmyjob.filefirst.models import ApplicationEntry, BoardDiscoveryState, LiveRunState, LocalModelSettings, PortalsConfig, RunRecord, SourceBoardConfig, SubmissionQuestion, SubmissionRecord, TrackedCompany, utcnow_iso
+from findmyjob.filefirst.models import ApplicationEntry, BoardDiscoveryState, LiveRunState, LocalModelSettings, RunRecord, SourceBoardConfig, SubmissionQuestion, SubmissionRecord, TrackedCompany, utcnow_iso
 from findmyjob.filefirst.operator_support import _workspace_stats, begin_live_run, emit_live_event as operator_emit_live_event, finish_live_run, jobs_table_payload as operator_jobs_table_payload, live_status_payload as operator_live_status_payload
 from findmyjob.filefirst.readiness import collect_filefirst_release_snapshot
 from findmyjob.filefirst.screening import override_screening, screen_job, screening_payload

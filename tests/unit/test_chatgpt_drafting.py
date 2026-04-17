@@ -9,7 +9,6 @@ from pypdf import PdfWriter
 from findmyjob.documents.pipeline import RenderedArtifact
 from findmyjob.filefirst.chatgpt_drafting import (
     ChatGPTDraftingService,
-    _RETRY_LINKS_PROMPT,
     _RETRY_ATTACHMENTS_PROMPT,
     build_chatgpt_prompt,
     classify_downloads,
@@ -1073,7 +1072,6 @@ def test_download_pdfs_reprompts_when_turn_uses_sandbox_paths(monkeypatch, tmp_p
 
     initial_turn = {"locator": object(), "text": "[[PDF_OUTPUT_READY]]\nsandbox:/mnt/data/resume.pdf\nsandbox:/mnt/data/cover.pdf\n[[PDF_OUTPUT_COMPLETE]]"}
     recovered_turn = {"locator": object(), "text": "[[PDF_OUTPUT_READY]]\nResume PDF\nCover Letter PDF\n[[PDF_OUTPUT_COMPLETE]]"}
-    prompts: list[str] = []
 
     class _FakeLocator:
         async def scroll_into_view_if_needed(self) -> None:

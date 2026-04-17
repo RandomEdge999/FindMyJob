@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import anyio
 
 from findmyjob.core.async_compat import run_async
-from findmyjob.apply.browser_session import launch_attachable_browser, open_browser_session, close_browser_session
+from findmyjob.apply.browser_session import launch_attachable_browser
 from findmyjob.core.config import AppConfig
 from findmyjob.filefirst.workspace import FileWorkspace
 from findmyjob.filefirst.text_utils import strip_html_tags
@@ -2008,7 +2008,6 @@ class ChatGPTDraftingService:
         except Exception:
             # Fallback: try via the page's own client if available
             try:
-                client = page._impl_obj._channel
                 await page.evaluate("() => {}")  # no-op to ensure page is ready
             except Exception:
                 pass

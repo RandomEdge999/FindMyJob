@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from findmyjob.core.enums import QuestionType, VerificationStatus
+from findmyjob.core.enums import QuestionType
 from findmyjob.core.types import ProfileFact
 from findmyjob.grounding.service import GroundingService
 

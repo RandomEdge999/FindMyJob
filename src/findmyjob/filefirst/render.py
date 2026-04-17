@@ -5,8 +5,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import anyio
-
 from findmyjob.core.async_compat import run_async
 from findmyjob.core.config import AppConfig
 from findmyjob.filefirst.chatgpt_drafting import ChatGPTDraftingService

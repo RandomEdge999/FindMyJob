@@ -9,7 +9,6 @@ import pytest
 
 from findmyjob.apply.cdp_session import (
     CDPAttachError,
-    _find_chrome_executable,
     cdp_browser_context,
     chrome_launch_command,
 )
