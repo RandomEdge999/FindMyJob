@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import anyio
 
@@ -2617,6 +2618,217 @@ class PlaywrightSubmitter:
             return await locator.get_attribute(name)
         except Exception:
             return None
+
+    @staticmethod
+    def _url_signature(value: str | None) -> str:
+        parsed = urlsplit(str(value or "").strip())
+        path = parsed.path.rstrip("/") or parsed.path
+        return urlunsplit((parsed.scheme.casefold(), parsed.netloc.casefold(), path, "", ""))
+
+    def _page_match_score(self, page_url: str | None, application_url: str | None) -> int:
+        page_signature = self._url_signature(page_url)
+        target_signature = self._url_signature(application_url)
+        if not page_signature or not target_signature:
+            return 0
+        if page_signature == target_signature:
+            return 4
+        if page_signature.startswith(target_signature) or target_signature.startswith(page_signature):
+            return 3
+        page_parsed = urlsplit(page_signature)
+        target_parsed = urlsplit(target_signature)
+        if page_parsed.netloc == target_parsed.netloc and page_parsed.path == target_parsed.path:
+            return 2
+        if page_parsed.netloc == target_parsed.netloc and page_parsed.path.startswith(target_parsed.path):
+            return 1
+        return 0
+
+    async def _find_attached_manual_handoff_page(self, browser: Any, application_url: str) -> tuple[Any | None, str | None]:
+        best_page = None
+        best_url = None
+        best_score = 0
+        for context in list(browser.contexts):
+            for page in list(context.pages):
+                try:
+                    page_url = str(getattr(page, "url", "") or "").strip()
+                except Exception:
+                    page_url = ""
+                score = self._page_match_score(page_url, application_url)
+                if score > best_score:
+                    best_page = page
+                    best_url = page_url
+                    best_score = score
+        return best_page, best_url
+
+    async def capture_manual_handoff_answers(
+        self,
+        *,
+        application_url: str,
+        bindings: list[FormFieldBinding],
+    ) -> dict[str, Any]:
+        playwright = None
+        browser = None
+        answers: list[dict[str, Any]] = []
+        try:
+            loop, previous_handler = self._install_playwright_exception_guard()
+            playwright = await self._start_playwright_runtime()
+            browser = await playwright.chromium.connect_over_cdp(self._manual_handoff_cdp_url())
+            page, page_url = await self._find_attached_manual_handoff_page(browser, application_url)
+            if page is None:
+                return {
+                    "page_found": False,
+                    "page_url": page_url,
+                    "answers": [],
+                    "error": "No parked application page matched the manual handoff URL.",
+                }
+            page.set_default_timeout(self.timeout_ms)
+            for binding in bindings:
+                answer_text = await self._capture_binding_value(page, binding)
+                if not answer_text:
+                    continue
+                answers.append(
+                    {
+                        "question_id": str(binding.metadata.get("question_id") or "").strip(),
+                        "field": binding.source_field_name,
+                        "prompt_text": binding.prompt_text,
+                        "widget_type": binding.widget_type,
+                        "answer_text": answer_text,
+                    }
+                )
+            return {
+                "page_found": True,
+                "page_url": page_url or getattr(page, "url", None),
+                "answers": answers,
+                "error": None,
+            }
+        except Exception as exc:
+            return {
+                "page_found": False,
+                "page_url": None,
+                "answers": [],
+                "error": str(exc),
+            }
+        finally:
+            try:
+                disconnect = getattr(browser, "disconnect", None)
+                if callable(disconnect):
+                    await disconnect()
+            except Exception:
+                pass
+            if playwright is not None:
+                await self._stop_playwright_runtime(playwright)
+            self._restore_playwright_exception_guard(loop if 'loop' in locals() else None, previous_handler if 'previous_handler' in locals() else None)
+
+    def _all_option_choices(self, binding: FormFieldBinding) -> list[dict[str, str]]:
+        option_details = list(binding.metadata.get("option_details") or [])
+        resolved: list[dict[str, str]] = []
+        for option in option_details:
+            label = str(option.get("label") or option.get("value") or option.get("id") or "").strip()
+            value = str(option.get("value") or option.get("id") or option.get("label") or "").strip()
+            if not label and not value:
+                continue
+            choice = {"label": label or value, "value": value or label}
+            if choice not in resolved:
+                resolved.append(choice)
+        if resolved:
+            return resolved
+        for raw in self._dedupe_strings([*binding.option_values, binding.option_value, *binding.values, binding.value]):
+            resolved.append({"label": raw, "value": raw})
+        return resolved
+
+    async def _capture_binding_value(self, page: Any, binding: FormFieldBinding) -> str | None:
+        if binding.artifact_binding is not None:
+            return None
+        widget_type = str(binding.widget_type or "").strip().lower()
+        if widget_type in {"select", "dropdown"}:
+            return await self._capture_select_value(page, binding)
+        if widget_type in {"checkbox", "checkbox_group"}:
+            return await self._capture_checkbox_values(page, binding)
+        if widget_type in {"radio", "radio_group"}:
+            return await self._capture_radio_value(page, binding)
+        return await self._capture_text_value(page, binding)
+
+    async def _capture_text_value(self, page: Any, binding: FormFieldBinding) -> str | None:
+        locator = await self._field_locator(page, binding)
+        if locator is None:
+            return None
+        try:
+            value = await locator.input_value()
+        except Exception:
+            try:
+                value = await locator.evaluate(
+                    """(el) => {
+                      const compact = (raw) => (raw || '').replace(/\\s+/g, ' ').trim();
+                      return compact('value' in el ? el.value : (el.textContent || ''));
+                    }"""
+                )
+            except Exception:
+                value = None
+        cleaned = str(value or "").strip()
+        return cleaned or None
+
+    async def _capture_select_value(self, page: Any, binding: FormFieldBinding) -> str | None:
+        locator = await self._field_locator(page, binding)
+        if locator is None:
+            return None
+        try:
+            payload = await locator.evaluate(
+                """(el) => {
+                  const compact = (raw) => (raw || '').replace(/\\s+/g, ' ').trim();
+                  const tag = compact(el.tagName).toLowerCase();
+                  const role = compact(el.getAttribute('role')).toLowerCase();
+                  const ariaAutocomplete = compact(el.getAttribute('aria-autocomplete')).toLowerCase();
+                  if (tag === 'select') {
+                    return Array.from(el.selectedOptions || [])
+                      .map((option) => compact(option.textContent) || compact(option.value))
+                      .filter(Boolean);
+                  }
+                  const wrapper = el.closest('.select-shell, .select__container, .select, .phone-input__country') || el.parentElement;
+                  const selected = wrapper
+                    ? Array.from(wrapper.querySelectorAll('.select__single-value, .select__multi-value__label'))
+                        .map((node) => compact(node.textContent))
+                        .filter(Boolean)
+                    : [];
+                  if (selected.length) return selected;
+                  if (role === 'combobox' || ariaAutocomplete === 'list') {
+                    const current = compact(el.value);
+                    return current ? [current] : [];
+                  }
+                  const current = compact(el.value);
+                  return current ? [current] : [];
+                }"""
+            )
+        except Exception:
+            payload = []
+        selected = self._dedupe_strings(list(payload or []))
+        return ", ".join(selected) if selected else None
+
+    async def _capture_checkbox_values(self, page: Any, binding: FormFieldBinding) -> str | None:
+        selected: list[str] = []
+        for choice in self._all_option_choices(binding):
+            locator = await self._choice_input_locator(page, binding, choice, "checkbox")
+            if locator is None:
+                continue
+            try:
+                checked = await locator.is_checked()
+            except Exception:
+                checked = False
+            if checked:
+                selected.append(choice["label"] or choice["value"])
+        selected = self._dedupe_strings(selected)
+        return ", ".join(selected) if selected else None
+
+    async def _capture_radio_value(self, page: Any, binding: FormFieldBinding) -> str | None:
+        for choice in self._all_option_choices(binding):
+            locator = await self._choice_input_locator(page, binding, choice, "radio")
+            if locator is None:
+                continue
+            try:
+                checked = await locator.is_checked()
+            except Exception:
+                checked = False
+            if checked:
+                return choice["label"] or choice["value"] or None
+        return None
 
     async def _apply_generic_binding(self, page, binding: FormFieldBinding) -> dict[str, Any]:
         audit = {

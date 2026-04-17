@@ -146,10 +146,53 @@ def test_review_application_can_record_manual_submission(tmp_path: Path) -> None
     assert updated_submission.status == 'submitted'
     assert updated_submission.submitted_at is not None
     assert updated_submission.result['manual_confirmation'] is True
+    assert updated_submission.result['review_history'][-1]['type'] == 'review.action.mark_submitted'
     assert updated_application is not None
     assert updated_application.status == 'Applied'
     assert inbox_job.workflow_state == 'applied'
     assert service.review_queue_payload()['count'] == 0
+
+
+def test_review_payloads_expose_summary_artifacts_and_manual_handoff(tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='001',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='q1',
+                    prompt_text='What is your preferred start date?',
+                    normalized_key='preferred-start-date',
+                    question_type='date',
+                    widget_type='date',
+                    required=True,
+                    needs_user_input=True,
+                )
+            ],
+            missing_required_fields=['What is your preferred start date?'],
+            warnings=['Manual handoff active'],
+            result={'manual_handoff_watch': {'active': True, 'status': 'watching', 'pending_count': 2}},
+        )
+    )
+
+    queue = service.review_queue_payload()
+    detail = service.application_detail_payload('001')
+    item = next(entry for entry in queue['items'] if entry['application_id'] == '001')
+
+    assert item['review_summary']['severity'] == 'danger'
+    assert item['review_summary']['blocker_count'] == 1
+    assert item['review_summary']['next_action'] == 'sync_manual_input'
+    assert item['manual_handoff']['active'] is True
+    assert item['manual_handoff']['pending_count'] == 2
+    assert detail['summary']['next_action'] == 'sync_manual_input'
+    assert any(artifact['kind'] == 'resume_pdf' for artifact in detail['artifacts'])
+    assert any(artifact['kind'] == 'evaluation_report' for artifact in detail['artifacts'])
+    assert detail['history'] == []
 
 
 def test_manual_answer_memory_appends_alternates_instead_of_replacing(tmp_path: Path) -> None:
@@ -308,12 +351,215 @@ def test_manual_handoff_preview_rebuilds_submission_plan_before_opening(monkeypa
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._adapter_for_job', lambda self, job: _PreviewAdapter())
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._prepare_submission_async', fake_prepare)
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._browser_runtime_blocker', lambda self: None)
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._start_manual_handoff_watcher', lambda self, application_id: True)
 
     left_open = anyio.run(service._open_manual_handoff_preview_async, '001', 'run-refresh')
 
     assert left_open is True
     assert prepared_calls == [('001', 'run-refresh')]
     assert seen_field_counts == [1]
+
+
+def test_manual_handoff_sync_saves_blank_and_corrected_answers(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='001',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='citizenship',
+                    prompt_text='In which country/region do you have citizenship?',
+                    normalized_key='country-of-citizenship',
+                    question_type='text',
+                    widget_type='text',
+                    required=True,
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Are you open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    option_details=[{'label': 'Yes', 'value': 'Yes'}, {'label': 'No', 'value': 'No'}],
+                    existing_answer='No',
+                ),
+                SubmissionQuestion(
+                    question_id='email_verification_code',
+                    prompt_text='Enter the 8-character verification code sent to your email to continue submission.',
+                    normalized_key='email_verification_code',
+                    question_type='text',
+                    widget_type='text',
+                    required=True,
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+            ],
+            missing_required_fields=['In which country/region do you have citizenship?'],
+            result={'manual_handoff_watch': {'active': True, 'status': 'watching'}},
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        _ = self
+        assert application_id == '001'
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'page_url': 'https://boards.greenhouse.io/acme/jobs/100#application',
+            'answers': [
+                {
+                    'question_id': 'citizenship',
+                    'prompt_text': 'In which country/region do you have citizenship?',
+                    'widget_type': 'text',
+                    'answer_text': 'Pakistan',
+                },
+                {
+                    'question_id': 'relocation',
+                    'prompt_text': 'Are you open to relocation?',
+                    'widget_type': 'select',
+                    'answer_text': 'Yes',
+                },
+                {
+                    'question_id': 'email_verification_code',
+                    'prompt_text': 'Enter the 8-character verification code sent to your email to continue submission.',
+                    'widget_type': 'text',
+                    'answer_text': 'KyLB26gG',
+                },
+            ],
+            'error': None,
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+
+    result = anyio.run(service._sync_manual_handoff_answers_async, '001', True, 'manual_handoff_test')
+
+    saved = ws.load_submission('001')
+    assert saved is not None
+    assert result['updated_count'] == 2
+    assert result['filled_blank_count'] == 1
+    assert result['corrected_answer_count'] == 1
+    assert saved.manual_answers['citizenship'] == 'Pakistan'
+    assert saved.manual_answers['relocation'] == 'Yes'
+    assert 'email_verification_code' not in saved.manual_answers
+    assert next(item for item in saved.questions if item.question_id == 'citizenship').needs_user_input is False
+    assert next(item for item in saved.questions if item.question_id == 'relocation').needs_user_input is False
+    assert next(item for item in saved.questions if item.question_id == 'email_verification_code').needs_user_input is True
+    assert saved.result['manual_handoff_watch']['synced_question_count'] == 2
+    assert saved.result['manual_handoff_watch']['filled_blank_count'] == 1
+    assert saved.result['manual_handoff_watch']['corrected_answer_count'] == 1
+    assert saved.result['manual_handoff_watch']['recent_answers'][0]['previous_answer'] == ''
+    assert saved.result['manual_handoff_watch']['recent_answers'][1]['change_type'] == 'corrected_answer'
+    assert saved.result['review_history'][-1]['type'] == 'review.manual_handoff.synced'
+
+    answer_memory = ws.load_answer_memory()
+    assert any(item.canonical_question == 'country-of-citizenship' and item.answer_text == 'Pakistan' for item in answer_memory)
+    assert any(item.canonical_question == 'open-to-relocation' and item.answer_text == 'Yes' for item in answer_memory)
+    assert not any(item.canonical_question == 'email_verification_code' for item in answer_memory)
+
+
+def test_answer_question_does_not_remember_email_verification_code(tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='001',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='email_verification_code',
+                    prompt_text='Enter the 8-character verification code sent to your email to continue submission.',
+                    normalized_key='email_verification_code',
+                    question_type='text',
+                    widget_type='text',
+                    required=True,
+                    needs_user_input=True,
+                    verification_status='needs_user_input',
+                )
+            ],
+            missing_required_fields=['Enter the 8-character verification code sent to your email to continue submission.'],
+        )
+    )
+
+    result = service.answer_question(
+        application_id='001',
+        question_id='email_verification_code',
+        answer_text='KyLB26gG',
+        approve_memory=True,
+        auto_retry=False,
+    )
+
+    saved = ws.load_submission('001')
+    assert saved is not None
+    assert 'email_verification_code' not in saved.manual_answers
+    question = next(item for item in saved.questions if item.question_id == 'email_verification_code')
+    assert question.existing_answer is None
+    assert question.needs_user_input is True
+    assert question.confidence_reason == 'transient_answer_not_persisted'
+    assert not any(item.canonical_question == 'email_verification_code' for item in ws.load_answer_memory())
+    assert result['question']['existing_answer'] is None
+
+
+def test_email_verification_binding_never_reuses_saved_code(tmp_path: Path) -> None:
+    service, _ws = _seed_service_workspace(tmp_path)
+    record = SubmissionRecord(
+        application_id='001',
+        job_id='job-100',
+        company='Acme',
+        role='Backend Platform Engineer',
+        source='greenhouse',
+        manual_answers={'email_verification_code': 'KyLB26gG'},
+    )
+    plan = SubmissionPlan(
+        source_kind='greenhouse',
+        application_url='https://boards.greenhouse.io/acme/jobs/100',
+        fields=[],
+    )
+
+    updated_plan = service._with_email_verification_code_binding(plan, record)
+
+    assert updated_plan.fields == []
+
+
+def test_review_application_can_sync_manual_input(monkeypatch, tmp_path: Path) -> None:
+    service, _ws = _seed_service_workspace(tmp_path)
+
+    async def fake_sync(self, application_id, approve_memory=True, source='manual_handoff_sync'):
+        _ = self
+        assert application_id == '001'
+        assert approve_memory is True
+        assert source == 'manual_handoff_console_sync'
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'updated_count': 2,
+            'filled_blank_count': 1,
+            'corrected_answer_count': 1,
+            'remaining_blockers': [],
+            'status': 'needs_user_input',
+            'watch_state': {'active': True, 'status': 'watching'},
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._sync_manual_handoff_answers_async', fake_sync)
+
+    result = service.review_application(application_id='001', action='sync_manual_input')
+
+    assert result['page_found'] is True
+    assert result['synced_count'] == 2
+    assert result['filled_blank_count'] == 1
+    assert result['corrected_answer_count'] == 1
+    assert result['remaining_blockers'] == []
 
 
 def test_submission_registry_persists_across_service_instances(tmp_path: Path) -> None:

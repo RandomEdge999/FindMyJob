@@ -1,15 +1,17 @@
 ﻿
-import { useEffect, useMemo, useState } from 'react'
-import { Link, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router-dom'
 
 const NAV_ITEMS = [
   { label: 'Dashboard', to: '/' },
-  { label: 'Setup', to: '/setup' },
-  { label: 'Settings', to: '/settings' },
   { label: 'Autopilot', to: '/autopilot' },
   { label: 'Review', to: '/review' },
-  { label: 'Runs', to: '/runs' },
+  { label: 'Settings', to: '/settings' },
 ]
+
+const NAV_ROUTE_ALIASES = {
+  '/daily': '/autopilot',
+}
 
 const STAGE_LABELS = {
   idle: 'Idle',
@@ -145,6 +147,10 @@ function usePolledJson(url, intervalMs = 5000) {
   }
 
   return { data, error, loading, refresh }
+}
+
+function navPathForLocation(pathname) {
+  return NAV_ROUTE_ALIASES[pathname] || pathname
 }
 
 function normalizeChoice(value) {
@@ -566,6 +572,21 @@ function Section({ eyebrow, title, description, actions, children, className = '
   )
 }
 
+function ConsoleDisclosure({ title, summary, open, onToggle, children }) {
+  return (
+    <section className={`console-disclosure ${open ? 'open' : ''}`.trim()}>
+      <button aria-expanded={open} className="console-disclosure-toggle" type="button" onClick={onToggle}>
+        <div>
+          <strong>{title}</strong>
+          {summary ? <div className="cell-meta">{summary}</div> : null}
+        </div>
+        <span className="console-disclosure-state">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open ? <div className="console-disclosure-body">{children}</div> : null}
+    </section>
+  )
+}
+
 function MetricGrid({ items, className = '' }) {
   return (
     <div className={`metric-grid ${className}`.trim()}>
@@ -793,7 +814,15 @@ function JobsTable({ rows, onApply }) {
     <div className="table-wrap">
       <table className="data-table">
         <thead>
-          <tr><th>Company</th><th>Role</th><th>State</th><th>Progress</th><th>Blockers</th><th>Updated</th><th>Action</th></tr>
+          <tr>
+            <th>Company</th>
+            <th>Role</th>
+            <th>State</th>
+            <th>Progress</th>
+            <th>Blockers</th>
+            <th>Updated</th>
+            {onApply ? <th>Action</th> : null}
+          </tr>
         </thead>
         <tbody>
           {rows.map((row) => {
@@ -809,7 +838,7 @@ function JobsTable({ rows, onApply }) {
                 <td><div>{progressLabel}</div><div className="cell-meta">{row.preview_ready ? 'preview generated' : row.submit_ready ? 'ready to submit' : row.workflow_state || '-'}</div></td>
                 <td>{blockers.length ? <div className="cell-meta">{compactList(blockers, 2)}</div> : <span className="cell-meta">-</span>}</td>
                 <td>{formatDate(updatedAt)}</td>
-                <td>{onApply && row.application_id ? <button className="button button-ghost" type="button" onClick={() => onApply(row)}>Apply</button> : <span className="cell-meta">-</span>}</td>
+                {onApply ? <td>{row.application_id ? <button className="button button-ghost" type="button" onClick={() => onApply(row)}>Apply</button> : <span className="cell-meta">-</span>}</td> : null}
               </tr>
             )
           })}
@@ -865,98 +894,59 @@ function SourceHealthPanel({ operator }) {
     </Section>
   )
 }
-function DashboardPage({ operator, live }) {
-  const dashboard = usePolledJson('/api/dashboard', 7000)
-  const counts = dashboard.data?.snapshot?.counts || {}
-  const auto = dashboard.data?.autonomous || {}
-  const jobsTable = dashboard.data?.jobs_table?.items || []
-  const [notice, setNotice] = useState('')
-  const [resetting, setResetting] = useState(false)
-
-  async function startDiscover() {
-    await requestJson('/api/discover', { method: 'POST' })
-    await Promise.allSettled([live.refresh(), dashboard.refresh()])
-  }
-
-  async function startAutonomous() {
-    await requestJson('/api/autonomous/run', { method: 'POST' })
-    await Promise.allSettled([live.refresh(), dashboard.refresh()])
-  }
-
-  async function applyNow(row) {
-    if (!row?.application_id) return
-    await requestJson('/api/review/action', {
-      method: 'POST',
-      body: JSON.stringify({ application_id: row.application_id, action: 'approve' }),
-    })
-    await Promise.allSettled([dashboard.refresh(), live.refresh()])
-  }
-
-  async function resetOperationalData() {
-    setResetting(true)
-    try {
-      const result = await requestJson('/api/workspace/reset-operational', { method: 'POST' })
-      const deleted = result?.deleted || {}
-      setNotice(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.jobs || 0} job files, ${deleted.runs || 0} runs.`)
-      await Promise.allSettled([dashboard.refresh(), live.refresh()])
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err))
-    } finally {
-      setResetting(false)
-    }
-  }
-
+function RunStatusSummaryCard({ operator, title = 'Run Status', description, actions }) {
+  const runLabel = operator.isRunning ? operator.runType : 'idle'
+  const stageLabel = STAGE_LABELS[operator.stage] || operator.stage || 'Idle'
   const summaryCards = [
-    { label: 'Inbox', value: formatNumber(counts.inbox ?? 0), note: 'jobs in workspace' },
-    { label: 'Applications', value: formatNumber(operator.counters.evaluated || counts.applications || 0), note: 'tracked application records' },
-    { label: 'Queue Depth', value: formatNumber(auto.queue_depth ?? operator.queue.depth), note: 'active submission records' },
-    { label: 'Blocked', value: formatNumber(operator.counters.blockedByQuestions || auto.blocked_by_questions || auto.blocked_applications || operator.queue.blocked), note: 'manual answers needed' },
-    { label: 'Ready', value: formatNumber(operator.counters.readyToApply || auto.ready_to_apply || auto.ready_for_submit || 0), note: `${formatNumber(auto.ready_to_apply_threshold || 5)} threshold` },
-    { label: 'Prompts', value: formatNumber(auto.unresolved_prompts ?? operator.queue.pendingQuestions), note: 'manual questions waiting' },
-  ]
-
-  const discoveryCards = [
-    { label: 'Discovered', value: formatNumber(operator.counters.discovered), note: 'jobs retained in workspace' },
-    { label: 'Screened Out', value: formatNumber(operator.counters.screenedOut), note: 'rejected during screening' },
-    { label: 'Evaluated', value: formatNumber(operator.counters.evaluated), note: 'records created from evaluation' },
-    { label: 'Drafted', value: formatNumber(operator.counters.drafted), note: 'artifacts generated' },
-    { label: 'Ready To Apply', value: formatNumber(operator.counters.readyToApply), note: 'actual apply queue' },
-    { label: 'Submitted', value: formatNumber(operator.counters.submitted), note: 'successful submissions' },
-    { label: 'Blocked By Questions', value: formatNumber(operator.counters.blockedByQuestions), note: 'waiting on operator answers' },
-    { label: 'Board Progress', value: operator.counters.discoveryBoardsTotal ? `${formatNumber(operator.counters.discoveryBoardsCompleted)} / ${formatNumber(operator.counters.discoveryBoardsTotal)}` : '-', note: `${formatNumber(operator.counters.discoverySeedPages)} seed pages crawled` },
-    { label: 'Hard Rejected', value: formatNumber(operator.counters.deterministicRejects), note: 'title or hard filters' },
-    { label: 'Failed', value: formatNumber(operator.counters.failed), note: 'terminal application failures' },
+    { label: 'Run', value: runLabel, note: operator.latestMessage || 'No active run.' },
+    { label: 'Stage', value: stageLabel, note: operator.currentTitle || 'No active target' },
+    { label: 'Queue', value: formatNumber(operator.queue.depth), note: `${formatNumber(operator.queue.blocked)} blocked / ${formatNumber(operator.queue.pendingQuestions)} prompts` },
+    { label: 'Submitted', value: formatNumber(operator.counters.submitted), note: `${formatNumber(operator.counters.failed)} failed` },
+    { label: 'Elapsed', value: operator.elapsed, note: `Last update ${operator.lastSeen}` },
+    { label: 'Stream', value: operator.streamHealth, note: operator.modelBadge || operator.modelProfile || '-' },
   ]
 
   return (
-    <div className="page-stack">
-      <Section eyebrow="Operator Console" title="Find My Job Console" description="Discovery, screening, drafting, review, and submit state now follows the backend run state instead of stale browser state." actions={<><button className="button button-primary" type="button" onClick={startDiscover} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'}</button><button className="button button-primary" type="button" onClick={startAutonomous} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'}</button><button className="button button-ghost" type="button" onClick={resetOperationalData} disabled={resetting}>{resetting ? 'Resetting' : 'Reset Operational Data'}</button></>}>
-        <div className="section-stack">
-          <CurrentProcessPanel operator={operator} />
-          <InlineNotice message={notice} tone={toneFor(notice)} />
-          <MetricGrid items={summaryCards} />
-          <Section eyebrow="Scoreboard" title="Discovery Scoreboard" description="Per-run counters from the live state." className="subsection-panel">
-            <MetricGrid items={discoveryCards} />
-          </Section>
-          <SourceHealthPanel operator={operator} />
+    <article className="panel run-status-card">
+      <div className="run-status-head">
+        <div>
+          <div className="eyebrow">Run Status</div>
+          <h3>{title}</h3>
+          <p className="section-copy">{description || operator.latestMessage || 'No active run is in progress right now.'}</p>
         </div>
-      </Section>
+        <div className="run-status-actions">
+          <Badge tone={toneForStream(operator.streamHealth)}>{operator.streamHealth}</Badge>
+          <Badge tone={toneFor(operator.status)}>{operator.status}</Badge>
+          {actions ? <div className="action-row">{actions}</div> : null}
+        </div>
+      </div>
+      <MetricGrid items={summaryCards} className="run-status-metrics" />
+      {operator.warningNotice ? <InlineNotice message={operator.warningNotice} tone="danger" /> : null}
+      {operator.latestError ? <InlineNotice message={operator.latestError} tone="danger" /> : null}
+    </article>
+  )
+}
 
-      <LiveTimelineSection operator={operator} live={live} eyebrow="Live Feed" title="Run Timeline" description="Structured live events from discovery through submission, with redacted trace summaries for model calls and pipeline steps." />
-
-      <Section eyebrow="Operator Queue" title="Jobs And Application State" description="Priority queue view showing current stage, blockers, and next action.">
-        <DataState error={dashboard.error} loading={dashboard.loading} empty={!jobsTable.length} emptyLabel="No queue rows yet." emptyDetail="Discovery will populate jobs here and the apply pipeline will add submission state.">
-          <JobsTable rows={jobsTable.slice(0, 20)} onApply={applyNow} />
-        </DataState>
-      </Section>
+function RunsHistoryList({ runItems }) {
+  return (
+    <div className="runs-list">
+      {runItems.map((run) => (
+        <article className="finding-card" key={run.run_id}>
+          <div className="activity-meta">
+            <Badge tone={toneFor(run.status)}>{run.status}</Badge>
+            <span>{run.run_type}</span>
+            <span>{formatDate(run.completed_at || run.started_at)}</span>
+          </div>
+          <strong>{run.run_id}</strong>
+          <div className="detail-line">submitted {(run.submitted_count ?? run.submitted_application_ids?.length) || 0} / failed {(run.failed_count ?? run.failed_application_ids?.length) || 0}</div>
+          <div className="detail-line">processed {(run.processed_count ?? run.processed_job_ids?.length) || 0} / evaluated {(run.evaluated_count ?? run.evaluated_application_ids?.length) || 0}</div>
+        </article>
+      ))}
     </div>
   )
 }
 
-function SetupPage() {
-  const readiness = usePolledJson('/api/setup/readiness', 8000)
-  const [message, setMessage] = useState('')
-  const [resetting, setResetting] = useState(false)
+function ReadinessPanel({ readiness, message, resetting, onReset }) {
   const findings = readiness.data?.findings || []
   const profileSurface = readiness.data?.profile_surface || {}
   const profileMode =
@@ -967,53 +957,109 @@ function SetupPage() {
         : 'Sample Mode'
   const activeAdvancedPaths = Array.isArray(profileSurface.active_advanced_paths) ? profileSurface.active_advanced_paths.filter(Boolean) : []
 
-  async function resetOperationalData() {
-    setResetting(true)
-    try {
-      const result = await requestJson('/api/workspace/reset-operational', { method: 'POST' })
-      const deleted = result?.deleted || {}
-      setMessage(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.submissions || 0} submissions, ${deleted.runs || 0} runs.`)
-      await readiness.refresh()
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : String(err))
-    } finally {
-      setResetting(false)
-    }
-  }
-
   return (
-    <div className="page-stack">
-      <Section eyebrow="Readiness" title="Workspace And Launch Checks" description="Config validation, model doctor, and launch checks from the backend release pipeline." actions={<button className="button button-ghost" type="button" onClick={resetOperationalData} disabled={resetting}>{resetting ? 'Resetting...' : 'Reset Operational Data'}</button>}>
-        <DataState error={readiness.error} loading={readiness.loading} empty={!readiness.data}>
+    <Section eyebrow="Readiness" title="Workspace Readiness" description="Launch checks, profile surface status, and the release gates that determine whether the workspace is ready for real applications." actions={<button className="button button-ghost" type="button" onClick={onReset} disabled={resetting}>{resetting ? 'Resetting...' : 'Reset Operational Data'}</button>}>
+      <DataState error={readiness.error} loading={readiness.loading} empty={!readiness.data}>
+        <div className="section-stack">
           <MetricGrid items={[
             { label: 'Overall', value: readiness.data?.overall_status || '-', note: 'combined release signal' },
             { label: 'Config', value: readiness.data?.config_validation?.overall_status || '-', note: 'workspace config' },
-            { label: 'Doctor', value: readiness.data?.doctor?.overall_status || '-', note: 'model and runtime' },
-            { label: 'Launch', value: readiness.data?.launch_check?.overall_status || '-', note: 'production launch gate' },
+            { label: 'Doctor', value: readiness.data?.doctor?.overall_status || '-', note: 'runtime and browser readiness' },
+            { label: 'Launch', value: readiness.data?.launch_check?.overall_status || '-', note: 'final release gate' },
             { label: 'Sources', value: formatNumber(Object.keys(readiness.data?.sources || {}).length), note: 'configured source families' },
-            { label: 'Submit', value: readiness.data?.automation?.submit_enabled ? 'on' : 'off', note: 'submit toggle' },
-            { label: 'Profile Mode', value: profileMode, note: profileSurface.configured ? 'local-only candidate data is active' : 'still using tracked sample data' },
+            { label: 'Submit', value: readiness.data?.automation?.submit_enabled ? 'on' : 'off', note: 'submission toggle' },
+            { label: 'Profile Mode', value: profileMode, note: profileSurface.configured ? 'local-only candidate data is active' : 'tracked sample data is still active' },
           ]} />
-          <div className="panel" style={{ marginTop: '1rem' }}>
+          <div className="subpanel settings-card">
             <div className="eyebrow">Local Profile Surface</div>
-            <h3>{profileMode}</h3>
+            <strong>{profileMode}</strong>
             <p className="section-copy">
               {profileSurface.configured
-                ? 'The repo is reading local-only candidate data from ignored override paths.'
-                : 'The repo is still using tracked sample candidate data. Create a local-only profile before real runs.'}
+                ? 'The app is reading local-only candidate data from ignored override paths.'
+                : 'The app is still reading tracked sample candidate data. Switch to local-only profile files before real runs.'}
             </p>
-            <p><strong>Local profile file:</strong> <code>{profileSurface.local_path || '.fmj/local-overrides/filefirst/user-profile.yml'}</code></p>
-            <p><strong>Local template:</strong> <code>{profileSurface.local_template_path || '.fmj/local-overrides/filefirst/user-profile.template.yml'}</code></p>
-            <p><strong>Tracked example:</strong> <code>{profileSurface.public_template_path || 'templates/user-profile.local.example.yml'}</code></p>
-            {activeAdvancedPaths.length ? <p><strong>Active advanced overrides:</strong> {activeAdvancedPaths.join(', ')}</p> : null}
+            <div className="detail-stack">
+              <div className="detail-line"><strong>Local profile file:</strong> <code>{profileSurface.local_path || '.fmj/local-overrides/filefirst/user-profile.yml'}</code></div>
+              <div className="detail-line"><strong>Local template:</strong> <code>{profileSurface.local_template_path || '.fmj/local-overrides/filefirst/user-profile.template.yml'}</code></div>
+              <div className="detail-line"><strong>Tracked example:</strong> <code>{profileSurface.public_template_path || 'templates/user-profile.local.example.yml'}</code></div>
+              {activeAdvancedPaths.length ? <div className="detail-line"><strong>Active advanced overrides:</strong> {activeAdvancedPaths.join(', ')}</div> : null}
+            </div>
           </div>
           <InlineNotice message={message} tone={toneFor(message)} />
-          <FindingsList items={findings} />
+          {findings.length ? <FindingsList items={findings} /> : null}
+        </div>
+      </DataState>
+    </Section>
+  )
+}
+
+function DashboardPage({ operator, live }) {
+  const dashboard = usePolledJson('/api/dashboard', 7000)
+  const runs = usePolledJson('/api/runs/history', 9000)
+  const counts = dashboard.data?.snapshot?.counts || {}
+  const auto = dashboard.data?.autonomous || {}
+  const recentRuns = runs.data?.items || []
+  const needsInputCount = operator.counters.blockedByQuestions || auto.blocked_by_questions || auto.blocked_applications || operator.queue.blocked
+  const [runHistoryOpen, setRunHistoryOpen] = useState(false)
+
+  const summaryCards = [
+    { label: 'Inbox', value: formatNumber(counts.inbox ?? 0), note: 'jobs in workspace' },
+    { label: 'Needs Input', value: formatNumber(needsInputCount), note: 'manual answers still needed' },
+    { label: 'Ready', value: formatNumber(operator.counters.readyToApply || auto.ready_to_apply || auto.ready_for_submit || 0), note: `${formatNumber(auto.ready_to_apply_threshold || 5)} threshold` },
+    { label: 'Submitted', value: formatNumber(operator.counters.submitted), note: 'successful submissions' },
+  ]
+
+  useEffect(() => {
+    if (recentRuns.length > 0) {
+      const mostRecent = recentRuns[0]
+      const completedAt = mostRecent?.completed_at || mostRecent?.started_at
+      if (completedAt) {
+        const hoursAgo = (Date.now() - new Date(completedAt).getTime()) / (1000 * 60 * 60)
+        if (hoursAgo < 24) setRunHistoryOpen(true)
+      }
+    }
+  }, [recentRuns.length])
+
+  return (
+    <div className="page-stack">
+      <Section eyebrow="Dashboard" title="Overview And Health" description="Pipeline health, queue pressure, and discovery coverage at a glance.">
+        <DataState error={dashboard.error} loading={dashboard.loading} empty={!dashboard.data}>
+          <div className="section-stack">
+            <RunStatusSummaryCard
+              actions={<><Link className="button button-primary" to="/autopilot">Open Autopilot</Link><Link className="button button-ghost" to="/review">{needsInputCount > 0 ? `Review (${formatNumber(needsInputCount)} need input)` : 'Open Review'}</Link></>}
+              description="Use Autopilot to run the pipeline. Use Review only when an application needs your attention."
+              operator={operator}
+              title={operator.isRunning ? `${String(operator.runType || 'run').replace(/_/g, ' ')} in progress` : 'No Active Run'}
+            />
+            <MetricGrid items={summaryCards} />
+          </div>
+        </DataState>
+      </Section>
+
+      <SourceHealthPanel operator={operator} />
+
+      <Section eyebrow="Recent Activity" title="Activity & Run History" description="Pipeline events and completed runs. Open Autopilot for the full execution timeline and trace tools." actions={<Link className="button button-ghost" to="/autopilot">Open Full Timeline</Link>}>
+        <DataState error={live.error} loading={!operator.events.length && connectionLoading(operator)} empty={!operator.events.length && !recentRuns.length} emptyLabel="No activity yet." emptyDetail="Start discovery or open Autopilot to run the pipeline.">
+          <div className="section-stack">
+            {operator.events.length ? <ActivityFeed events={operator.eventsDescending.slice(0, 4)} /> : null}
+            <ConsoleDisclosure
+              open={runHistoryOpen}
+              onToggle={() => setRunHistoryOpen((c) => !c)}
+              summary={`${formatNumber(recentRuns.length)} recent run(s) recorded.`}
+              title="Run History"
+            >
+              <DataState error={runs.error} loading={runs.loading} empty={!recentRuns.length} emptyLabel="No runs recorded yet.">
+                <RunsHistoryList runItems={recentRuns.slice(0, 5)} />
+              </DataState>
+            </ConsoleDisclosure>
+          </div>
         </DataState>
       </Section>
     </div>
   )
 }
+
+
 const ROUTING_FAMILIES = [
   {
     id: 'screening',
@@ -1389,7 +1435,9 @@ function ModelHotSwap({ settings, onSaved, onPing, loadingState = {} }) {
 
 function SettingsPage() {
   const settings = usePolledJson('/api/settings', 8000)
+  const readiness = usePolledJson('/api/setup/readiness', 8000)
   const [message, setMessage] = useState('')
+  const [readinessMessage, setReadinessMessage] = useState('')
   const [savingState, setSavingState] = useState({})
   const [dirtyState, setDirtyState] = useState({ autonomous: false, chatgpt: false, portals: false, runtime: false, profile: false })
   const [autonomousForm, setAutonomousForm] = useState(null)
@@ -1400,6 +1448,21 @@ function SettingsPage() {
   const [profileForm, setProfileForm] = useState(applyProviderDefaults({
     name: '', role: 'writer', provider: LMSTUDIO_DEFAULT_PROVIDER, transport: 'local_http', model: '', base_url: LMSTUDIO_DEFAULT_HOST, api_key_env: '', temperature: 0.2, max_tokens: 8192, preferred_context_window: 131072, supports_structured_output: true, fallback_chain_text: '', policy_tags_text: '', local: true, command_text: '', working_dir: '',
   }))
+  const [resetting, setResetting] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const openSection = searchParams.get('section') || ''
+
+  function toggleSection(key) {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      if (next.get('section') === key) { next.delete('section') } else { next.set('section', key) }
+      return next
+    }, { replace: true })
+  }
+
+  function isSectionOpen(key) {
+    return openSection === key
+  }
 
   function markDirty(key) {
     setDirtyState((prev) => ({ ...prev, [key]: true }))
@@ -1440,6 +1503,12 @@ function SettingsPage() {
       setRuntimeModelForm(applyProviderDefaults(settings.data.runtime_model || settings.data.local_model))
     }
   }, [dirtyState.autonomous, dirtyState.chatgpt, dirtyState.portals, dirtyState.runtime, settings.data])
+
+  useEffect(() => {
+    if (!openSection && readiness.data?.overall_status && readiness.data.overall_status !== 'pass') {
+      toggleSection('readiness')
+    }
+  }, [readiness.data?.overall_status])
 
   const advancedProfiles = settings.data?.advanced_models?.profiles || []
   const runtimeChecks = settings.data?.last_model_checks || {}
@@ -1648,35 +1717,59 @@ function SettingsPage() {
     }
   }
 
+  async function resetOperationalData() {
+    setResetting(true)
+    try {
+      const result = await requestJson('/api/workspace/reset-operational', { method: 'POST' })
+      const deleted = result?.deleted || {}
+      setReadinessMessage(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.submissions || 0} submissions, ${deleted.runs || 0} runs.`)
+      await Promise.allSettled([readiness.refresh(), settings.refresh()])
+    } catch (err) {
+      setReadinessMessage(err instanceof Error ? err.message : String(err))
+    } finally {
+      setResetting(false)
+    }
+  }
+
   return (
     <div className="page-stack">
-      <Section eyebrow="Launch Readiness" title="Control Center" description="One control plane for launch scope, runtime models, routing families, and health checks.">
+      <Section eyebrow="Settings" title="Configuration" description="Expand any section to configure. Sections auto-open when they need attention.">
         <DataState error={settings.error} loading={settings.loading} empty={!settings.data}>
-          <InlineNotice message={message} tone={toneFor(message)} />
-          {Object.values(dirtyState).some(Boolean) ? <InlineNotice message="Unsaved local edits are preserved in the browser until you save them." tone="warning" /> : null}
-          <MetricGrid items={[
-            { label: 'Runtime Mode', value: modelStrategy.mode || 'lm_studio_local', note: modelStrategy.launch_transport_mix || 'LM Studio local routing' },
-            { label: 'Draft Renderer', value: settings.data?.drafting_strategy?.renderer || settings.data?.chatgpt_drafting?.renderer || '-', note: settings.data?.chatgpt_drafting?.enabled ? 'ChatGPT-managed PDF drafting' : 'renderer not configured' },
-            { label: 'Runtime Default', value: modelStrategy.model || runtimeModelForm?.model || '-', note: modelStrategy.base_url || runtimeModelForm?.base_url || '-' },
-            { label: 'Transport', value: modelStrategy.transport || runtimeModelForm?.transport || '-', note: providerLabel(modelStrategy.provider || runtimeModelForm?.provider) },
-            { label: 'API Key', value: 'not required', note: 'LM Studio runs over local HTTP without API-key routing.' },
-            { label: 'Profiles', value: formatNumber(advancedProfiles.length), note: 'active router profiles' },
-            { label: 'Config', value: settings.data?.readiness?.config_validation?.overall_status || '-', note: 'workspace validation' },
-            { label: 'Doctor', value: settings.data?.readiness?.doctor?.overall_status || '-', note: 'runtime + browser readiness' },
-            { label: 'Launch', value: settings.data?.readiness?.launch_check?.overall_status || '-', note: 'final release gate' },
-          ]} />
-          <FindingsList items={readinessFindings.slice(0, 16)} />
+          <div className="section-stack">
+            <InlineNotice message={message} tone={toneFor(message)} />
+            {Object.values(dirtyState).some(Boolean) ? <InlineNotice message="Unsaved local edits stay in the browser until you save them." tone="warning" /> : null}
+            <MetricGrid items={[
+              { label: 'Launch', value: settings.data?.readiness?.launch_check?.overall_status || '-', note: 'final release gate' },
+              { label: 'Draft Renderer', value: settings.data?.drafting_strategy?.renderer || settings.data?.chatgpt_drafting?.renderer || '-', note: settings.data?.chatgpt_drafting?.enabled ? 'ChatGPT-managed' : 'not configured' },
+              { label: 'Runtime', value: modelStrategy.model || runtimeModelForm?.model || '-', note: providerLabel(modelStrategy.provider || runtimeModelForm?.provider) },
+              { label: 'Profiles', value: formatNumber(advancedProfiles.length), note: 'active router profiles' },
+            ]} />
+          </div>
         </DataState>
       </Section>
 
-      <Section eyebrow="Drafting" title="ChatGPT Drafting" description="Live resume and cover-letter generation now uses the managed ChatGPT profile. LM Studio stays in scope for screening and application-question answering.">
+      <ConsoleDisclosure
+        open={isSectionOpen('readiness')}
+        onToggle={() => toggleSection('readiness')}
+        summary={`Overall: ${readiness.data?.overall_status || 'loading'} · Config: ${readiness.data?.config_validation?.overall_status || '-'} · Doctor: ${readiness.data?.doctor?.overall_status || '-'} · Launch: ${readiness.data?.launch_check?.overall_status || '-'}`}
+        title="Readiness & Workspace Health"
+      >
+        <ReadinessPanel message={readinessMessage} onReset={resetOperationalData} readiness={readiness} resetting={resetting} />
+      </ConsoleDisclosure>
+
+      <ConsoleDisclosure
+        open={isSectionOpen('chatgpt')}
+        onToggle={() => toggleSection('chatgpt')}
+        summary={`${settings.data?.chatgpt_drafting?.enabled ? 'Enabled' : 'Disabled'} · ${chatgptForm?.browser_mode || 'attached'} · ${String(chatgptForm?.max_parallel_jobs || 1)} parallel · Last: ${settings.data?.chatgpt_drafting?.last_result?.success ? 'success' : settings.data?.chatgpt_drafting?.last_error ? 'failed' : 'idle'}`}
+        title="ChatGPT Drafting"
+      >
         <DataState error={settings.error} loading={settings.loading} empty={!chatgptForm}>
           <form className="section-stack" onSubmit={saveChatgptDrafting} onChangeCapture={() => markDirty('chatgpt')}>
             <MetricGrid items={[
               { label: 'Renderer', value: settings.data?.chatgpt_drafting?.renderer || '-', note: 'active document strategy' },
               { label: 'Browser Mode', value: chatgptForm?.browser_mode || 'attached', note: settings.data?.chatgpt_drafting?.browser?.profile_dir_exists ? 'profile directory present' : 'profile directory not initialized yet' },
               { label: 'Parallel Drafts', value: String(chatgptForm?.max_parallel_jobs || 1), note: 'concurrent ChatGPT tabs for document generation' },
-              { label: 'Temporary Chat', value: chatgptForm?.use_temporary_chat ? 'enabled' : 'disabled', note: 'disable when ChatGPT attachment downloads are more reliable without it' },
+              { label: 'Temporary Chat', value: chatgptForm?.use_temporary_chat ? 'enabled' : 'disabled', note: 'disable when downloads are more reliable without it' },
               { label: 'Launch', value: settings.data?.chatgpt_drafting?.launch_status?.last_browser_launch_ok ? 'ok' : 'pending', note: settings.data?.chatgpt_drafting?.launch_status?.last_browser_launch_at || 'no launch recorded' },
               { label: 'Last Draft', value: settings.data?.chatgpt_drafting?.last_result?.success ? 'success' : settings.data?.chatgpt_drafting?.last_error ? 'failed' : 'idle', note: settings.data?.chatgpt_drafting?.last_error || settings.data?.chatgpt_drafting?.last_result?.application_id || 'no draft recorded' },
             ]} />
@@ -1697,7 +1790,7 @@ function SettingsPage() {
               <label className="checkbox-field"><input type="checkbox" checked={Boolean(chatgptForm?.use_temporary_chat)} onChange={(event) => setChatgptForm({ ...chatgptForm, use_temporary_chat: event.target.checked })} /><span>Use ChatGPT temporary chat</span></label>
               <label className="checkbox-field"><input type="checkbox" checked={Boolean(chatgptForm?.make_default)} onChange={(event) => setChatgptForm({ ...chatgptForm, make_default: event.target.checked })} /><span>Keep as default renderer</span></label>
             </div>
-            <div className="detail-line">This browser session is separate from ATS submit automation. Downloads are captured into the workspace runtime folder and then normalized into the existing submission artifact names.</div>
+            <div className="detail-line">This browser session is separate from ATS submit automation. Downloads land in the runtime folder and are then normalized into the usual submission artifact names.</div>
             <div className="form-actions">
               <button className="button button-primary" type="submit" disabled={Boolean(savingState.chatgpt)}>{savingState.chatgpt ? 'Saving...' : 'Save ChatGPT Drafting'}</button>
               <button className="button button-ghost" type="button" onClick={launchChatgptBrowser} disabled={Boolean(savingState.chatgptLaunch)}>{savingState.chatgptLaunch ? 'Launching...' : 'Launch Browser'}</button>
@@ -1705,9 +1798,14 @@ function SettingsPage() {
             </div>
           </form>
         </DataState>
-      </Section>
+      </ConsoleDisclosure>
 
-      <Section eyebrow="Sources" title="Sources & Automation" description="Manage enabled discovery sources, additive board seeds, and tracked companies without losing unsaved edits to background refreshes.">
+      <ConsoleDisclosure
+        open={isSectionOpen('sources')}
+        onToggle={() => toggleSection('sources')}
+        summary={PORTAL_SOURCE_OPTIONS.map((s) => `${s.label}: ${portalForm?.sources?.[s.id]?.enabled ? 'on' : 'off'}`).join(' · ') + ` · ${(portalForm?.tracked_companies || []).length} tracked companies`}
+        title="Sources & Discovery"
+      >
         <DataState error={settings.error} loading={settings.loading} empty={!portalForm}>
           <form className="section-stack" onSubmit={savePortals} onChangeCapture={() => markDirty('portals')}>
             <div className="settings-grid">
@@ -1731,7 +1829,7 @@ function SettingsPage() {
             </div>
             <article className="subpanel settings-card">
               <div className="eyebrow">Tracked Companies</div>
-              <div className="detail-line">Optional company-specific biasing inputs. These add priority seeds for discovery, but they no longer cap the broader built-in board universe.</div>
+              <div className="detail-line">Optional company-specific inputs. These add priority seeds for discovery without narrowing the broader board universe.</div>
               <div className="tracked-company-list">
                 {(portalForm?.tracked_companies || []).map((company, index) => (
                   <div className="tracked-company-card" key={`${company.name || 'company'}-${index}`}>
@@ -1752,13 +1850,18 @@ function SettingsPage() {
             </article>
           </form>
         </DataState>
-      </Section>
+      </ConsoleDisclosure>
 
-      <Section eyebrow="Routing" title="Model Routing" description="Set the LM Studio runtime for screening and application-question answering. Role-level overrides stay available below, and legacy writer bindings remain optional rollback paths.">
+      <ConsoleDisclosure
+        open={isSectionOpen('automation')}
+        onToggle={() => toggleSection('automation')}
+        summary={`Pipeline: ${autonomousForm?.enabled ? 'on' : 'off'} · Submit: ${autonomousForm?.submit_enabled ? 'on' : 'off'} · Model: ${runtimeModelForm?.model || '-'} · ${providerLabel(runtimeModelForm?.provider)}`}
+        title="Automation & Runtime"
+      >
         <DataState error={settings.error} loading={settings.loading} empty={!runtimeModelForm}>
           <div className="settings-grid">
             <article className="subpanel settings-card">
-              <div className="eyebrow">Automation Controls</div>
+              <div className="eyebrow">Automation Defaults</div>
               <form className="form-grid" onSubmit={saveAutonomous} onChangeCapture={() => markDirty('autonomous')}>
                 <label><span>Default Submit Mode</span><select value={autonomousForm?.default_submit_mode || 'auto_submit'} onChange={(event) => setAutonomousForm({ ...autonomousForm, default_submit_mode: event.target.value })}><option value="auto_submit">auto_submit</option><option value="preview_first">preview_first</option></select></label>
                 <label><span>Browser Mode</span><select value={autonomousForm?.browser_mode || 'headless'} onChange={(event) => setAutonomousForm({ ...autonomousForm, browser_mode: event.target.value })}><option value="headed">headed (visible browser)</option><option value="headless">headless (background)</option><option value="attached">attached (CDP debug)</option></select></label>
@@ -1771,7 +1874,7 @@ function SettingsPage() {
                 <label><span>Captcha API Key Env</span><input value={autonomousForm?.captcha_api_key_env || 'CAPTCHA_API_KEY'} onChange={(event) => setAutonomousForm({ ...autonomousForm, captcha_api_key_env: event.target.value })} /></label>
                 <label><span>Captcha Timeout (s)</span><input type="number" value={autonomousForm?.captcha_solve_timeout_seconds || 300} onChange={(event) => setAutonomousForm({ ...autonomousForm, captcha_solve_timeout_seconds: Number(event.target.value) })} /></label>
                 <label><span>Launch Scope</span><input value={Array.isArray(autonomousForm?.production_sources) ? autonomousForm.production_sources.join(', ') : ''} readOnly /></label>
-                <div className="detail-line span-all">Autonomous runs stop for the day once recorded submissions reach the daily max. Discovery and queue-building continue normally until that cap is hit.</div>
+                <div className="detail-line span-all">Autonomous submission stops for the day once recorded submissions reach the daily max. Discovery and queue-building continue until that cap is hit.</div>
                 <label className="checkbox-field"><input type="checkbox" checked={Boolean(autonomousForm?.enabled)} onChange={(event) => setAutonomousForm({ ...autonomousForm, enabled: event.target.checked })} /><span>Autonomous pipeline enabled</span></label>
                 <label className="checkbox-field"><input type="checkbox" checked={Boolean(autonomousForm?.submit_enabled)} onChange={(event) => setAutonomousForm({ ...autonomousForm, submit_enabled: event.target.checked })} /><span>Submit enabled</span></label>
                 <label className="checkbox-field"><input type="checkbox" checked={Boolean(autonomousForm?.browser_attach_enabled)} onChange={(event) => setAutonomousForm({ ...autonomousForm, browser_attach_enabled: event.target.checked })} /><span>Browser attach enabled</span></label>
@@ -1790,7 +1893,7 @@ function SettingsPage() {
                 <label><span>Temperature</span><input type="number" step="0.1" value={runtimeModelForm?.temperature || 0} onChange={(event) => setRuntimeModelForm({ ...runtimeModelForm, temperature: Number(event.target.value) })} /></label>
                 <label><span>Max Tokens</span><input type="number" value={runtimeModelForm?.max_tokens || 0} onChange={(event) => setRuntimeModelForm({ ...runtimeModelForm, max_tokens: Number(event.target.value) })} /></label>
                 <label><span>Preferred Context Window</span><input type="number" value={runtimeModelForm?.preferred_context_window || 0} onChange={(event) => setRuntimeModelForm({ ...runtimeModelForm, preferred_context_window: Number(event.target.value) })} /></label>
-                <div className="detail-line span-all">Launch uses LM Studio-local only. Enter the loaded LM Studio model id and the local server base URL.</div>
+                <div className="detail-line span-all">Launch uses LM Studio-local only. Enter the loaded model id and the local server base URL.</div>
                 <div className="detail-line span-all">{runtimeCatalog.note || `${formatNumber(runtimeCatalog.count || 0)} models available from ${runtimeCatalog.source || 'LM Studio'}.`}</div>
                 {runtimeChecks['runtime-model'] ? <div className="detail-line span-all">Last ping: {runtimeChecks['runtime-model'].classification || (runtimeChecks['runtime-model'].ok ? 'ok' : 'failed')} · {formatDate(runtimeChecks['runtime-model'].checked_at)}</div> : null}
                 <div className="form-actions span-all">
@@ -1807,51 +1910,62 @@ function SettingsPage() {
             </article>
           </div>
         </DataState>
-      </Section>
+      </ConsoleDisclosure>
 
-      <Section eyebrow="Model Routing" title="Workflow Families" description="Switch grouped local-model families for screening and question answering. Legacy drafting roles remain available for rollback, but live document drafting now runs through ChatGPT.">
+      <ConsoleDisclosure
+        open={isSectionOpen('models')}
+        onToggle={() => toggleSection('models')}
+        summary={`${formatNumber(advancedProfiles.length)} profiles · ${modelStrategy.mode || 'lm_studio_local'} routing`}
+        title="Models & Profiles"
+      >
         <DataState error={settings.error} loading={settings.loading} empty={!settings.data}>
-          <ModelHotSwap settings={settings.data} onSaved={() => settings.refresh()} onPing={pingModel} loadingState={savingState} />
-        </DataState>
-      </Section>
-
-      <Section eyebrow="Advanced Routing" title="Role-Level Profiles" description="Fine-grained model control for individual roles, transports, commands, and fallback chains.">
-        <DataState error={settings.error} loading={settings.loading} empty={!settings.data}>
-          <ProfileInventory profiles={advancedProfiles} checks={runtimeChecks} onPing={pingModel} onDelete={deleteProfile} loadingState={savingState} />
-          <form className="form-grid form-compact" onSubmit={saveProfile} onChangeCapture={() => markDirty('profile')}>
-            <label><span>Name</span><input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label>
-            <label><span>Role</span><input value={profileForm.role} onChange={(event) => setProfileForm({ ...profileForm, role: event.target.value })} /></label>
-            <label><span>Provider</span><input value="LM Studio" readOnly /></label>
-            <label><span>Transport</span><input value="Local HTTP" readOnly /></label>
-            <label><span>Model</span><input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} /></label>
-            <label><span>Base URL</span><input value={profileForm.base_url} placeholder={LMSTUDIO_DEFAULT_HOST} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} /></label>
-            <label><span>Temperature</span><input type="number" step="0.1" value={profileForm.temperature} onChange={(event) => setProfileForm({ ...profileForm, temperature: Number(event.target.value) })} /></label>
-            <label><span>Max Tokens</span><input type="number" value={profileForm.max_tokens} onChange={(event) => setProfileForm({ ...profileForm, max_tokens: Number(event.target.value) })} /></label>
-            <label><span>Preferred Context Window</span><input type="number" value={profileForm.preferred_context_window} onChange={(event) => setProfileForm({ ...profileForm, preferred_context_window: Number(event.target.value) })} /></label>
-            <label><span>Fallback Chain</span><input value={profileForm.fallback_chain_text} onChange={(event) => setProfileForm({ ...profileForm, fallback_chain_text: event.target.value })} placeholder="comma,separated,profile-names" /></label>
-            <label><span>Policy Tags</span><input value={profileForm.policy_tags_text} onChange={(event) => setProfileForm({ ...profileForm, policy_tags_text: event.target.value })} placeholder="draft,review,screen" /></label>
-            <label className="checkbox-field"><input type="checkbox" checked={Boolean(profileForm.supports_structured_output)} onChange={(event) => setProfileForm({ ...profileForm, supports_structured_output: event.target.checked })} /><span>Structured output</span></label>
-            <label className="checkbox-field"><input type="checkbox" checked={Boolean(profileForm.local)} onChange={(event) => setProfileForm({ ...profileForm, local: event.target.checked })} /><span>Mark as local</span></label>
-            <div className="form-actions span-all">
-              <button className="button button-primary" type="submit" disabled={Boolean(savingState.profile)}>{savingState.profile ? 'Saving...' : 'Save Profile'}</button>
-              <button className="button button-ghost" type="button" onClick={() => pingModel({
-                name: profileForm.name || 'draft-profile',
-                role: profileForm.role,
-                provider: LMSTUDIO_DEFAULT_PROVIDER,
-                transport: 'local_http',
-                model: profileForm.model,
-                base_url: profileForm.base_url,
-                temperature: Number(profileForm.temperature || 0.2),
-                max_tokens: Number(profileForm.max_tokens || 8192),
-                preferred_context_window: Number(profileForm.preferred_context_window || 131072),
-                local: true,
-                command: [],
-                working_dir: '',
-              }, 'profileDraftPing')} disabled={Boolean(savingState.profileDraftPing)}>{savingState.profileDraftPing ? 'Pinging...' : 'Ping Draft Profile'}</button>
+          <div className="section-stack">
+            <div className="subpanel settings-card">
+              <div className="eyebrow">Workflow Families</div>
+              <div className="detail-line">Switch grouped local-model families for screening and question answering. Legacy drafting roles remain available for rollback, but live document drafting runs through ChatGPT.</div>
+              <ModelHotSwap settings={settings.data} onSaved={() => settings.refresh()} onPing={pingModel} loadingState={savingState} />
             </div>
-          </form>
+
+            <div className="subpanel settings-card">
+              <div className="eyebrow">Role-Level Profiles</div>
+              <div className="detail-line">Fine-grained control for individual roles, transports, commands, and fallback chains.</div>
+              <ProfileInventory profiles={advancedProfiles} checks={runtimeChecks} onPing={pingModel} onDelete={deleteProfile} loadingState={savingState} />
+              <form className="form-grid form-compact" onSubmit={saveProfile} onChangeCapture={() => markDirty('profile')}>
+                <label><span>Name</span><input value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label>
+                <label><span>Role</span><input value={profileForm.role} onChange={(event) => setProfileForm({ ...profileForm, role: event.target.value })} /></label>
+                <label><span>Provider</span><input value="LM Studio" readOnly /></label>
+                <label><span>Transport</span><input value="Local HTTP" readOnly /></label>
+                <label><span>Model</span><input value={profileForm.model} onChange={(event) => setProfileForm({ ...profileForm, model: event.target.value })} /></label>
+                <label><span>Base URL</span><input value={profileForm.base_url} placeholder={LMSTUDIO_DEFAULT_HOST} onChange={(event) => setProfileForm({ ...profileForm, base_url: event.target.value })} /></label>
+                <label><span>Temperature</span><input type="number" step="0.1" value={profileForm.temperature} onChange={(event) => setProfileForm({ ...profileForm, temperature: Number(event.target.value) })} /></label>
+                <label><span>Max Tokens</span><input type="number" value={profileForm.max_tokens} onChange={(event) => setProfileForm({ ...profileForm, max_tokens: Number(event.target.value) })} /></label>
+                <label><span>Preferred Context Window</span><input type="number" value={profileForm.preferred_context_window} onChange={(event) => setProfileForm({ ...profileForm, preferred_context_window: Number(event.target.value) })} /></label>
+                <label><span>Fallback Chain</span><input value={profileForm.fallback_chain_text} onChange={(event) => setProfileForm({ ...profileForm, fallback_chain_text: event.target.value })} placeholder="comma,separated,profile-names" /></label>
+                <label><span>Policy Tags</span><input value={profileForm.policy_tags_text} onChange={(event) => setProfileForm({ ...profileForm, policy_tags_text: event.target.value })} placeholder="draft,review,screen" /></label>
+                <label className="checkbox-field"><input type="checkbox" checked={Boolean(profileForm.supports_structured_output)} onChange={(event) => setProfileForm({ ...profileForm, supports_structured_output: event.target.checked })} /><span>Structured output</span></label>
+                <label className="checkbox-field"><input type="checkbox" checked={Boolean(profileForm.local)} onChange={(event) => setProfileForm({ ...profileForm, local: event.target.checked })} /><span>Mark as local</span></label>
+                <div className="form-actions span-all">
+                  <button className="button button-primary" type="submit" disabled={Boolean(savingState.profile)}>{savingState.profile ? 'Saving...' : 'Save Profile'}</button>
+                  <button className="button button-ghost" type="button" onClick={() => pingModel({
+                    name: profileForm.name || 'draft-profile',
+                    role: profileForm.role,
+                    provider: LMSTUDIO_DEFAULT_PROVIDER,
+                    transport: 'local_http',
+                    model: profileForm.model,
+                    base_url: profileForm.base_url,
+                    temperature: Number(profileForm.temperature || 0.2),
+                    max_tokens: Number(profileForm.max_tokens || 8192),
+                    preferred_context_window: Number(profileForm.preferred_context_window || 131072),
+                    local: true,
+                    command: [],
+                    working_dir: '',
+                  }, 'profileDraftPing')} disabled={Boolean(savingState.profileDraftPing)}>{savingState.profileDraftPing ? 'Pinging...' : 'Ping Draft Profile'}</button>
+                </div>
+              </form>
+            </div>
+          </div>
         </DataState>
-      </Section>
+      </ConsoleDisclosure>
     </div>
   )
 }
@@ -1928,93 +2042,1134 @@ function AutopilotPage({ operator, live }) {
     }
   }
 
+  const unresolvedCount = questionItems.filter((item) => !item.has_approved_memory).length
+  const [timelineOpen, setTimelineOpen] = useState(false)
+
   return (
     <div className="page-stack">
-      <Section eyebrow="Autopilot" title="Queue And Live Activity" description="Long-running work stays visible across navigation and reloads because button state now derives from the backend live run state." actions={<><button className="button button-primary" type="button" onClick={startDiscover} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'}</button><button className="button button-primary" type="button" onClick={startAutonomous} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'}</button><button className="button button-ghost" type="button" onClick={resetOperationalData} disabled={resetting}>{resetting ? 'Resetting' : 'Reset Operational Data'}</button><button className="button button-ghost" type="button" onClick={purgeRejected}>Purge Rejected</button></>}>
+      <Section eyebrow="Autopilot" title="Execution Workspace" description="Run controls, queue metrics, and unresolved inputs on the left. Application table and live timeline on the right.">
         <DataState error={auto.error} loading={auto.loading} empty={!auto.data}>
-          <div className="section-stack">
-            <CurrentProcessPanel operator={operator} compact />
-            <InlineNotice message={notice} tone={toneFor(notice)} />
+          <RunStatusSummaryCard
+            actions={<><button className="button button-primary" type="button" onClick={startDiscover} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'}</button><button className="button button-primary" type="button" onClick={startAutonomous} disabled={operator.isRunning}>{operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'}</button><button className="button button-ghost" type="button" onClick={resetOperationalData} disabled={resetting}>{resetting ? 'Resetting' : 'Reset Operational Data'}</button><button className="button button-ghost" type="button" onClick={purgeRejected}>Purge Rejected</button></>}
+            description="Start discovery, run the full pipeline, and monitor queue movement here."
+            operator={operator}
+            title={operator.isRunning ? `${String(operator.runType || 'run').replace(/_/g, ' ')} in progress` : 'Ready to run'}
+          />
+          <InlineNotice message={notice} tone={toneFor(notice)} />
+        </DataState>
+      </Section>
+
+      <div className="autopilot-grid">
+        <div className="autopilot-grid-left">
+          <DataState error={auto.error} loading={auto.loading} empty={!auto.data}>
             <MetricGrid items={[
-              { label: 'Enabled', value: auto.data?.enabled ? 'on' : 'off', note: 'automation switch' },
-              { label: 'Submit', value: auto.data?.submit_enabled ? 'on' : 'off', note: 'submission toggle' },
-              { label: 'Submit Mode', value: auto.data?.default_submit_mode || '-', note: 'current submit strategy' },
-              { label: 'Daily Max', value: `${formatNumber(auto.data?.daily_submitted_today || 0)} / ${formatNumber(auto.data?.daily_submit_cap || 0)}`, note: auto.data?.daily_submit_cap ? `submissions recorded today; ${formatNumber(auto.data?.daily_remaining_capacity || 0)} remaining before the run stops` : 'daily cap not configured' },
-              { label: 'Source Mode', value: auto.data?.source_mode === 'greenhouse_launch_mode' ? 'Greenhouse launch mode' : 'Mixed / experimental', note: auto.data?.experimental_sources_enabled?.length ? `experimental on: ${auto.data.experimental_sources_enabled.join(', ')}` : 'experimental sources available but off' },
-              { label: 'Drafting Mode', value: auto.data?.drafting_mode === 'serial' ? 'serial' : 'parallel', note: auto.data?.drafting_mode === 'serial' ? 'draft, prepare, and apply one job at a time' : 'multiple drafts can run before apply begins' },
-              { label: 'Ready Threshold', value: formatNumber(auto.data?.ready_to_apply_threshold || 10), note: auto.data?.configured_ready_to_apply_threshold && auto.data?.configured_ready_to_apply_threshold !== auto.data?.ready_to_apply_threshold ? `effective threshold ${formatNumber(auto.data?.ready_to_apply_threshold || 10)} from configured ${formatNumber(auto.data?.configured_ready_to_apply_threshold || 10)}` : 'start apply at this depth' },
+              { label: 'Daily Max', value: `${formatNumber(auto.data?.daily_submitted_today || 0)} / ${formatNumber(auto.data?.daily_submit_cap || 0)}`, note: `${formatNumber(auto.data?.daily_remaining_capacity || 0)} remaining` },
               { label: 'Queue Depth', value: formatNumber(auto.data?.queue_depth || operator.queue.depth), note: 'active queue' },
-              { label: 'Blocked', value: formatNumber(auto.data?.blocked_by_questions || auto.data?.blocked_applications || operator.queue.blocked), note: 'manual answers needed' },
+              { label: 'Blocked', value: formatNumber(auto.data?.blocked_by_questions || auto.data?.blocked_applications || operator.queue.blocked), note: 'answers needed' },
               { label: 'Prompts', value: formatNumber(auto.data?.unresolved_prompts || operator.queue.pendingQuestions), note: 'manual questions' },
               { label: 'Draft Batch', value: auto.data?.drafting_batch?.member_count ? `${formatNumber(auto.data?.drafting_batch?.completed_count || 0)} / ${formatNumber(auto.data?.drafting_batch?.member_count || 0)}` : '-', note: describeDraftBatch(auto.data?.drafting_batch, auto.data?.ready_to_apply_threshold || 10) },
-              { label: 'Active Draft Tabs', value: formatNumber(auto.data?.drafting_batch?.active_worker_count || auto.data?.drafting_batch?.active_count || 0), note: `live ChatGPT tabs for the current batch (parallel cap ${formatNumber(auto.data?.drafting_parallel_limit || 0) || 0})` },
-              { label: 'Temp Chat', value: operator.temporaryChatStatus || '-', note: operator.temporaryChatCheckedAt || 'no drafting preflight recorded yet' },
+              { label: 'Drafting Mode', value: auto.data?.drafting_mode === 'serial' ? 'serial' : 'parallel', note: auto.data?.drafting_mode === 'serial' ? 'one at a time' : 'concurrent' },
             ]} />
-          </div>
-        </DataState>
-      </Section>
+          </DataState>
 
-      <Section eyebrow="Questions" title="Unresolved Inputs" description="Only the prompts that could not be safely answered are surfaced here.">
-        <DataState error={questions.error} loading={questions.loading} empty={!questionItems.length} emptyLabel="No manual questions." emptyDetail="The queue is either ready to apply or waiting on discovery and drafting.">
-          <InlineNotice message={notice} tone={toneFor(notice)} />
-          <div className="question-list">
-            {questionItems.map((item) => {
-              const key = answerKey(item)
-              const options = questionOptions(item)
-              const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(item, item.existing_answer ?? '')
-              const isCheckboxGroup = item.widget_type === 'checkbox_group' && options.length > 0
-              const isSelect = options.length > 0 && !isCheckboxGroup
-              const selectedValues = Array.isArray(value) ? value : []
-              return <article className="question-card" key={`${item.application_id}-${item.question_id}`}><div className="activity-meta"><Badge tone={item.has_approved_memory ? 'success' : 'warning'}>{item.question_type}</Badge><span>{item.company}</span><span>{item.title}</span></div><strong>{item.prompt_text}</strong><div className="answer-row">{isCheckboxGroup ? <div className="detail-stack">{options.map((option) => <label key={`${item.question_id}-${option.label}`}><input checked={selectedValues.includes(option.label)} onChange={(event) => setAnswers((current) => { const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues; const selected = Array.isArray(base) ? [...base] : []; return { ...current, [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter((entry) => entry !== option.label) } })} type="checkbox" /> {option.label}</label>)}</div> : isSelect ? <select value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}><option value="">Select answer</option>{options.map((option) => <option key={`${item.question_id}-${option.value}-${option.label}`} value={option.label}>{option.label}</option>)}</select> : <input value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder="Type answer" />}<button className="button button-primary" type="button" onClick={() => submitAnswer(item)}>Save Answer</button></div><div className="cell-meta">Saved answers are reused automatically the next time this prompt appears.</div></article>
-            })}
-          </div>
-        </DataState>
-      </Section>
+          <ConsoleDisclosure
+            open={unresolvedCount > 0}
+            onToggle={() => {}}
+            summary={`${formatNumber(questionItems.length)} total · ${formatNumber(unresolvedCount)} unresolved`}
+            title="Question Queue"
+          >
+            <DataState error={questions.error} loading={questions.loading} empty={!questionItems.length} emptyLabel="No manual questions." emptyDetail="The queue is either ready to apply or waiting on discovery and drafting.">
+              <div className="question-list">
+                {questionItems.map((item) => {
+                  const key = answerKey(item)
+                  const options = questionOptions(item)
+                  const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(item, item.existing_answer ?? '')
+                  const isCheckboxGroup = item.widget_type === 'checkbox_group' && options.length > 0
+                  const isSelect = options.length > 0 && !isCheckboxGroup
+                  const selectedValues = Array.isArray(value) ? value : []
+                  return <article className="question-card" key={`${item.application_id}-${item.question_id}`}><div className="activity-meta"><Badge tone={item.has_approved_memory ? 'success' : 'warning'}>{item.question_type}</Badge><span>{item.company}</span><span>{item.title}</span></div><strong>{item.prompt_text}</strong><div className="answer-row">{isCheckboxGroup ? <div className="detail-stack">{options.map((option) => <label key={`${item.question_id}-${option.label}`}><input checked={selectedValues.includes(option.label)} onChange={(event) => setAnswers((current) => { const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues; const selected = Array.isArray(base) ? [...base] : []; return { ...current, [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter((entry) => entry !== option.label) } })} type="checkbox" /> {option.label}</label>)}</div> : isSelect ? <select value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}><option value="">Select answer</option>{options.map((option) => <option key={`${item.question_id}-${option.value}-${option.label}`} value={option.label}>{option.label}</option>)}</select> : <input value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder="Type answer" />}<button className="button button-primary" type="button" onClick={() => submitAnswer(item)}>Save Answer</button></div><div className="cell-meta">Saved answers are reused automatically the next time this prompt appears.</div></article>
+                })}
+              </div>
+            </DataState>
+          </ConsoleDisclosure>
+        </div>
 
-      <LiveTimelineSection operator={operator} live={live} eyebrow="Live Activity" title="Operator Timeline" description="The active run feed is backed by persisted events and trace refs, so blocked submit and silent model failures stop looking like idle UI." />
-      <Section eyebrow="Queue" title="Applications Table" description="Operational queue view prioritized around blocker state and actionability."><DataState error={jobs.error} loading={jobs.loading} empty={!jobItems.length} emptyLabel="No jobs in the queue."><JobsTable rows={jobItems} onApply={applyFromTable} /></DataState></Section>
+        <div className="autopilot-grid-right">
+          <DataState error={jobs.error} loading={jobs.loading} empty={!jobItems.length} emptyLabel="No jobs in the queue.">
+            <JobsTable rows={jobItems} onApply={applyFromTable} />
+          </DataState>
+
+          <ConsoleDisclosure
+            open={timelineOpen || operator.isRunning}
+            onToggle={() => setTimelineOpen((c) => !c)}
+            summary={operator.isRunning ? 'Active run in progress' : 'Last run events'}
+            title="Live Timeline"
+          >
+            <LiveTimelineSection operator={operator} live={live} eyebrow="Live Activity" title="Operator Timeline" description="The active run feed is backed by persisted events and trace refs." />
+          </ConsoleDisclosure>
+        </div>
+      </div>
     </div>
   )
 }
 
-function ReviewPage({ operator, live }) {
+const REVIEW_TABS = [
+  { key: 'summary', label: 'Summary' },
+  { key: 'questions', label: 'Questions' },
+  { key: 'handoff', label: 'Manual Handoff' },
+  { key: 'artifacts', label: 'Artifacts' },
+  { key: 'history', label: 'History' },
+]
+
+const REVIEW_SECTION_FROM_TAB = {
+  summary: 'needs_attention',
+  questions: 'questions',
+  handoff: 'handoff',
+  artifacts: 'documents',
+  history: 'advanced',
+}
+
+const REVIEW_TAB_FROM_SECTION = {
+  needs_attention: 'summary',
+  questions: 'questions',
+  handoff: 'handoff',
+  documents: 'artifacts',
+  advanced: 'history',
+}
+
+const REVIEW_QUEUE_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'needs_input', label: 'Needs Input' },
+  { key: 'manual_handoff', label: 'Manual Handoff' },
+  { key: 'ready', label: 'Ready' },
+]
+
+const REVIEW_ACTION_LABELS = {
+  approve: 'Approve / Apply',
+  request_input: 'Open For Manual Input',
+  sync_manual_input: 'Sync Browser Changes',
+  mark_submitted: 'Mark As Submitted',
+  reject: 'Reject',
+  save_answers: 'Save Answers',
+  review_summary: 'Review Summary',
+}
+
+const REVIEW_SEVERITY_WEIGHT = { danger: 3, warning: 2, success: 1, neutral: 0 }
+
+function reviewActionLabel(action) {
+  return REVIEW_ACTION_LABELS[action] || String(action || 'Review').replace(/_/g, ' ')
+}
+
+function reviewActionTone(action) {
+  if (action === 'approve' || action === 'mark_submitted') return 'success'
+  if (action === 'reject') return 'danger'
+  if (action === 'sync_manual_input' || action === 'request_input' || action === 'save_answers') return 'warning'
+  return 'neutral'
+}
+
+function reviewSectionFromTab(tab) {
+  return REVIEW_SECTION_FROM_TAB[String(tab || '').toLowerCase()] || 'needs_attention'
+}
+
+function reviewTabForSection(section) {
+  return REVIEW_TAB_FROM_SECTION[section] || 'summary'
+}
+
+function reviewSeverityWeight(summary) {
+  return REVIEW_SEVERITY_WEIGHT[String(summary?.severity || 'neutral')] ?? 0
+}
+
+function reviewSortComparator(sortState) {
+  const key = sortState?.key || 'default'
+  const direction = sortState?.direction === 'asc' ? 1 : -1
+  const compareString = (left, right) => String(left || '').localeCompare(String(right || ''), undefined, { sensitivity: 'base' })
+  const compareNumber = (left, right) => safeNumber(left) - safeNumber(right)
+  return (left, right) => {
+    if (key === 'default') {
+      const severityDelta = reviewSeverityWeight(right.review_summary) - reviewSeverityWeight(left.review_summary)
+      if (severityDelta) return severityDelta
+      const blockerDelta = safeNumber(right.review_summary?.blocker_count) - safeNumber(left.review_summary?.blocker_count)
+      if (blockerDelta) return blockerDelta
+      return compareString(left.company, right.company)
+    }
+    let base = 0
+    switch (key) {
+      case 'company':
+        base = compareString(left.company, right.company)
+        break
+      case 'status':
+        base = compareString(left.review_status || left.status, right.review_status || right.status)
+        break
+      case 'blockers':
+        base = compareNumber(left.review_summary?.blocker_count, right.review_summary?.blocker_count)
+        break
+      case 'ats':
+        base = compareString(left.classification?.ats_family || left.source, right.classification?.ats_family || right.source)
+        break
+      case 'handoff':
+        base = compareNumber(left.manual_handoff?.active ? 1 : 0, right.manual_handoff?.active ? 1 : 0) ||
+          compareNumber(left.manual_handoff?.pending_count, right.manual_handoff?.pending_count)
+        break
+      case 'next_action':
+        base = compareString(left.review_summary?.next_action, right.review_summary?.next_action)
+        break
+      default:
+        base = compareString(left.company, right.company)
+        break
+    }
+    if (base !== 0) return base * direction
+    return compareString(left.company, right.company)
+  }
+}
+
+function queueMatchesSearch(item, search) {
+  const text = String(search || '').trim().toLowerCase()
+  if (!text) return true
+  const haystack = [
+    item.company,
+    item.title,
+    item.source,
+    item.review_status,
+    item.status,
+    item.classification?.ats_family,
+    item.classification?.board_family,
+    item.review_summary?.next_action,
+    ...(item.review_summary?.blocker_labels || []),
+    ...(item.review_summary?.warning_labels || []),
+    ...(item.remaining_blockers || []).map((blocker) => blocker?.label || blocker?.category),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  return haystack.includes(text)
+}
+
+function isEditableShortcutTarget(target) {
+  if (!target || !(target instanceof HTMLElement)) return false
+  const tag = String(target.tagName || '').toLowerCase()
+  return tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button' || Boolean(target.isContentEditable)
+}
+
+function reviewQueueMatchesFilter(item, filterKey) {
+  const summary = item.review_summary || {}
+  const handoff = item.manual_handoff || {}
+  const unresolvedCount = safeNumber(summary.unresolved_question_count)
+  const blockerCount = safeNumber(summary.blocker_count)
+  const readyForSubmit = Boolean(summary.ready_for_submit) || (blockerCount === 0 && unresolvedCount === 0 && !handoff.active)
+  if (filterKey === 'needs_input') return blockerCount > 0 || unresolvedCount > 0
+  if (filterKey === 'manual_handoff') return Boolean(handoff.active)
+  if (filterKey === 'ready') return readyForSubmit && !handoff.active
+  return true
+}
+
+function reviewQueueAttentionSummary(item) {
+  const summary = item.review_summary || {}
+  const handoff = item.manual_handoff || {}
+  const blockerCount = safeNumber(summary.blocker_count)
+  const warningCount = safeNumber(summary.warning_count)
+  const unresolvedCount = safeNumber(summary.unresolved_question_count)
+  if (blockerCount > 0) return `${formatNumber(blockerCount)} blocker${blockerCount === 1 ? '' : 's'} to clear`
+  if (unresolvedCount > 0) return `${formatNumber(unresolvedCount)} answer${unresolvedCount === 1 ? '' : 's'} still needed`
+  if (handoff.active) return 'Manual handoff is open'
+  if (warningCount > 0) return `${formatNumber(warningCount)} warning${warningCount === 1 ? '' : 's'} to review`
+  return 'Ready to move forward'
+}
+
+function reviewQueueSupportingMeta(item) {
+  return dedupeStrings([
+    item.classification?.ats_family || item.classification?.board_family || '',
+    item.source || '',
+  ]).join(' / ')
+}
+
+function reviewSourceMeta(detail) {
+  return dedupeStrings([
+    detail?.application?.source || '',
+    detail?.summary?.classification?.ats_family || detail?.job?.ats_family || '',
+  ]).join(' / ')
+}
+
+function reviewArtifactForKinds(artifacts, ...kinds) {
+  return (artifacts || []).find((artifact) => kinds.includes(artifact.kind)) || null
+}
+
+function ReviewQueueTable({ items, selectedId, onSelect, onSort, sortState }) {
+  return (
+    <div className="table-wrap review-table-wrap">
+      <table className="data-table review-data-table">
+        <thead>
+          <tr>
+            <th><button className="review-sort" type="button" onClick={() => onSort('company')}>Company / Role</button></th>
+            <th><button className="review-sort" type="button" onClick={() => onSort('status')}>Status</button></th>
+            <th><button className="review-sort" type="button" onClick={() => onSort('blockers')}>Blockers</button></th>
+            <th><button className="review-sort" type="button" onClick={() => onSort('ats')}>ATS / Source</button></th>
+            <th><button className="review-sort" type="button" onClick={() => onSort('handoff')}>Handoff</button></th>
+            <th><button className="review-sort" type="button" onClick={() => onSort('next_action')}>Next Action</button></th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const summary = item.review_summary || {}
+            const handoff = item.manual_handoff || {}
+            const blockerSummary = summary.blocker_count
+              ? `${formatNumber(summary.blocker_count)} blocker${summary.blocker_count === 1 ? '' : 's'}`
+              : summary.warning_count
+                ? `${formatNumber(summary.warning_count)} warning${summary.warning_count === 1 ? '' : 's'}`
+                : 'Clear'
+            return (
+              <tr
+                className={`review-row-table ${selectedId === item.application_id ? 'selected' : ''}`.trim()}
+                key={item.application_id}
+                onClick={() => onSelect(item.application_id)}
+              >
+                <td>
+                  <div className="review-cell-stack">
+                    <strong>{item.company}</strong>
+                    <div className="cell-meta">{item.title}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={toneFor(summary.severity || item.review_status || item.status)}>{item.review_status || item.status}</Badge>
+                    <div className="cell-meta">{item.status || '-'}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={summary.blocker_count ? 'danger' : summary.warning_count ? 'warning' : 'success'}>{blockerSummary}</Badge>
+                    <div className="cell-meta">{summary.unresolved_question_count ? `${formatNumber(summary.unresolved_question_count)} unresolved prompt${summary.unresolved_question_count === 1 ? '' : 's'}` : 'No unresolved prompts'}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <div>{item.classification?.ats_family || item.classification?.board_family || '-'}</div>
+                    <div className="cell-meta">{item.source || '-'}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={handoff.active ? 'warning' : 'neutral'}>{handoff.status || 'idle'}</Badge>
+                    <div className="cell-meta">{handoff.active ? `pending ${formatNumber(handoff.pending_count || 0)}` : 'not active'}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={reviewActionTone(summary.next_action)}>{reviewActionLabel(summary.next_action)}</Badge>
+                    <div className="cell-meta">{summary.next_action_reason || '-'}</div>
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="cell-meta review-table-note">Sorted by {sortState.key === 'default' ? 'severity, blocker depth, company' : sortState.key.replace(/_/g, ' ')}.</div>
+    </div>
+  )
+}
+
+function ReviewTabNav({ activeTab, onChange }) {
+  return (
+    <div className="review-tab-nav" role="tablist" aria-label="Review detail tabs">
+      {REVIEW_TABS.map((tab) => (
+        <button
+          aria-selected={activeTab === tab.key}
+          className={`review-tab ${activeTab === tab.key ? 'active' : ''}`.trim()}
+          key={tab.key}
+          role="tab"
+          type="button"
+          onClick={() => onChange(tab.key)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ReviewQuestionsTab({ questions, selectedId, answers, setAnswers, onSave }) {
+  const unresolved = (questions || []).filter((question) => question.needs_user_input)
+  const resolved = (questions || []).filter((question) => !question.needs_user_input)
+  return (
+    <div className="detail-stack">
+      <div className="subpanel">
+        <div className="eyebrow">Unresolved Questions</div>
+        {unresolved.length ? (
+          <div className="detail-stack">
+            {unresolved.map((question) => {
+              const key = `${selectedId}::${question.question_id}`
+              const options = questionOptions(question)
+              const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(question, question.existing_answer ?? '')
+              const isCheckboxGroup = question.widget_type === 'checkbox_group' && options.length > 0
+              const isSelect = options.length > 0 && !isCheckboxGroup
+              const selectedValues = Array.isArray(value) ? value : []
+              return (
+                <div className="question-card" key={question.question_id}>
+                  <div className="activity-meta">
+                    <Badge tone={question.required ? 'warning' : 'neutral'}>{question.required ? 'required' : 'optional'}</Badge>
+                    <span>{question.question_type || question.widget_type || 'question'}</span>
+                    <span>{question.verification_status || 'needs_user_input'}</span>
+                  </div>
+                  <strong>{question.prompt_text}</strong>
+                  <div className="answer-row">
+                    {isCheckboxGroup ? (
+                      <div className="detail-stack checkbox-stack">
+                        {options.map((option) => (
+                          <label key={`${question.question_id}-${option.label}`}>
+                            <input
+                              checked={selectedValues.includes(option.label)}
+                              onChange={(event) => setAnswers((current) => {
+                                const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues
+                                const selected = Array.isArray(base) ? [...base] : []
+                                return {
+                                  ...current,
+                                  [key]: event.target.checked
+                                    ? dedupeStrings([...selected, option.label])
+                                    : selected.filter((entry) => entry !== option.label),
+                                }
+                              })}
+                              type="checkbox"
+                            /> {option.label}
+                          </label>
+                        ))}
+                      </div>
+                    ) : isSelect ? (
+                      <select value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}>
+                        <option value="">Select answer</option>
+                        {options.map((option) => <option key={`${question.question_id}-${option.value}-${option.label}`} value={option.label}>{option.label}</option>)}
+                      </select>
+                    ) : (
+                      <input value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder="Type answer" />
+                    )}
+                    <button className="button button-primary" type="button" onClick={() => onSave(question)}>Save Answer</button>
+                  </div>
+                  <div className="cell-meta">Saved answers are reused automatically the next time this prompt appears.</div>
+                </div>
+              )
+            })}
+          </div>
+        ) : <div className="detail-line">No unresolved questions.</div>}
+      </div>
+      <div className="subpanel">
+        <div className="eyebrow">Resolved Answers</div>
+        {resolved.length ? (
+          <div className="detail-stack">
+            {resolved.map((question) => (
+              <div className="review-resolved-answer" key={question.question_id}>
+                <div className="detail-line"><strong>{question.prompt_text}</strong></div>
+                <div className="cell-meta">{question.existing_answer || 'Saved with no visible answer text.'}</div>
+              </div>
+            ))}
+          </div>
+        ) : <div className="detail-line">No resolved answers yet.</div>}
+      </div>
+    </div>
+  )
+}
+
+function ReviewSummaryTab({ detail }) {
+  const application = detail?.application || {}
+  const summary = detail?.summary || {}
+  const blockers = detail?.blockers || []
+  const reportMarkdown = detail?.report_markdown || ''
+  return (
+    <div className="detail-stack">
+      <MetricGrid items={[
+        { label: 'Score', value: application.score ?? '-', note: 'evaluation score' },
+        { label: 'Grade', value: application.grade || '-', note: 'evaluation grade' },
+        { label: 'Missing', value: formatNumber(summary.missing_required_count || 0), note: 'required fields still missing' },
+        { label: 'Ungrounded', value: formatNumber(summary.ungrounded_count || 0), note: 'answers without grounding' },
+        { label: 'Low Confidence', value: formatNumber(summary.low_confidence_count || 0), note: 'answers needing review' },
+        { label: 'Warnings', value: formatNumber(summary.warning_count || 0), note: 'non-blocking warnings' },
+      ]} />
+      <div className="subpanel">
+        <div className="eyebrow">Recommended Next Action</div>
+        <div className="review-next-action">
+          <Badge tone={reviewActionTone(summary.next_action)}>{reviewActionLabel(summary.next_action)}</Badge>
+          <div className="detail-line">{summary.next_action_reason || 'No recommendation recorded.'}</div>
+        </div>
+      </div>
+      <div className="review-summary-grid">
+        <div className="subpanel">
+          <div className="eyebrow">Blockers</div>
+          {blockers.length ? (
+            <div className="detail-stack">
+              {blockers.map((blocker, index) => (
+                <div className="review-chip-row" key={`${blockerLabel(blocker)}-${index}`}>
+                  <Badge tone={blocker?.category === 'warning' ? 'warning' : 'danger'}>{blocker?.category || 'blocker'}</Badge>
+                  <div className="cell-meta">{blockerLabel(blocker)}</div>
+                </div>
+              ))}
+            </div>
+          ) : <div className="detail-line">No blockers recorded.</div>}
+        </div>
+        <div className="subpanel">
+          <div className="eyebrow">Screening And Classification</div>
+          <div className="detail-stack">
+            <div className="detail-line">Screening: {summary.screening_status || detail?.job?.screening_status || '-'}</div>
+            <div className="detail-line">ATS family: {summary.classification?.ats_family || detail?.job?.ats_family || '-'}</div>
+            <div className="detail-line">Board family: {summary.classification?.board_family || detail?.job?.board_family || '-'}</div>
+            <div className="detail-line">Automation tier: {summary.classification?.automation_tier || detail?.job?.automation_tier || '-'}</div>
+            <div className="detail-line">Login wall detected: {summary.login_wall_detected ? 'yes' : 'no'}</div>
+            {summary.hard_reject_reason ? <div className="detail-line">Hard reject reason: {summary.hard_reject_reason}</div> : null}
+            {summary.auth_reject_reason ? <div className="detail-line">Auth reject reason: {summary.auth_reject_reason}</div> : null}
+          </div>
+        </div>
+      </div>
+      <div className="subpanel">
+        <div className="eyebrow">Report Output</div>
+        <pre className="report-block">{reportMarkdown || 'No report available.'}</pre>
+      </div>
+    </div>
+  )
+}
+
+function ReviewHandoffTab({ manualHandoffWatch }) {
+  const recentAnswers = manualHandoffWatch?.recent_answers || []
+  return (
+    <div className="detail-stack">
+      <MetricGrid items={[
+        { label: 'Status', value: manualHandoffWatch?.status || (manualHandoffWatch?.active ? 'watching' : 'idle'), note: 'current watch state' },
+        { label: 'Last Sync', value: manualHandoffWatch?.last_synced_at ? formatDate(manualHandoffWatch.last_synced_at) : '-', note: 'latest sync from parked page' },
+        { label: 'Saved Answers', value: formatNumber(manualHandoffWatch?.synced_question_count || 0), note: 'all captured answers' },
+        { label: 'Blanks Filled', value: formatNumber(manualHandoffWatch?.filled_blank_count || 0), note: 'previously blank fields' },
+        { label: 'Corrections', value: formatNumber(manualHandoffWatch?.corrected_answer_count || 0), note: 'existing answers corrected' },
+        { label: 'Pending Text', value: formatNumber(manualHandoffWatch?.pending_count || 0), note: 'debounced text inputs waiting to settle' },
+      ]} />
+      <div className="subpanel">
+        <div className="eyebrow">Tracked Browser Page</div>
+        {manualHandoffWatch?.last_page_url ? (
+          <a href={manualHandoffWatch.last_page_url} rel="noreferrer" target="_blank">{manualHandoffWatch.last_page_url}</a>
+        ) : <div className="detail-line">No parked browser page URL recorded yet.</div>}
+      </div>
+      <div className="subpanel">
+        <div className="eyebrow">Recent Learned Changes</div>
+        {recentAnswers.length ? (
+          <div className="table-wrap">
+            <table className="data-table review-data-table handoff-change-table">
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>Previous</th>
+                  <th>New</th>
+                  <th>Change Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentAnswers.map((item, index) => (
+                  <tr key={`${item.question_id || item.prompt_text}-${index}`}>
+                    <td>{item.prompt_text || item.question_id || '-'}</td>
+                    <td>{item.previous_answer || '-'}</td>
+                    <td>{item.answer_text || '-'}</td>
+                    <td><Badge tone={item.filled_blank ? 'success' : 'warning'}>{item.change_type || (item.filled_blank ? 'filled_blank' : 'corrected_answer')}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="detail-line">No browser-synced answers recorded yet.</div>}
+      </div>
+    </div>
+  )
+}
+
+function ReviewArtifactsTab({ artifacts }) {
+  const groups = {
+    primary: (artifacts || []).filter((item) => item.group === 'primary'),
+    supporting: (artifacts || []).filter((item) => item.group === 'supporting'),
+    debug: (artifacts || []).filter((item) => item.group === 'debug'),
+  }
+  return (
+    <div className="detail-stack">
+      {Object.entries(groups).map(([group, items]) => (
+        <div className="subpanel" key={group}>
+          <div className="eyebrow">{group === 'primary' ? 'Primary Artifacts' : group === 'supporting' ? 'Supporting Sources' : 'Diagnostics'}</div>
+          {items.length ? (
+            <div className="detail-stack">
+              {items.map((artifact) => (
+                <div className="review-artifact-card" key={`${artifact.kind}-${artifact.target}`}>
+                  <div className="activity-meta">
+                    <Badge tone={artifact.exists ? 'success' : artifact.external ? 'neutral' : 'warning'}>{artifact.kind}</Badge>
+                    <span>{artifact.exists ? 'available' : artifact.external ? 'external' : 'missing'}</span>
+                  </div>
+                  <strong>{artifact.label}</strong>
+                  <div className="cell-meta">{artifact.relative_path || artifact.target || '-'}</div>
+                  {artifact.href ? <a href={artifact.href} rel="noreferrer" target="_blank">Open artifact</a> : <div className="detail-line">Artifact path recorded, but no openable file is available.</div>}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="detail-line">{group === 'primary' ? 'No primary artifacts are available for this application yet.' : 'No entries recorded for this group.'}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ReviewHistoryTab({ history }) {
+  return (
+    <div className="detail-stack">
+      {(history || []).length ? (
+        history.map((entry, index) => (
+          <article className="activity-item" key={`${entry.timestamp || index}-${entry.type || index}`}>
+            <div className="activity-meta">
+              <Badge tone={toneFor(entry.type || entry.summary)}>{entry.type || 'review.event'}</Badge>
+              <span>{entry.actor || 'operator'}</span>
+              <span>{entry.timestamp ? formatDate(entry.timestamp) : '-'}</span>
+            </div>
+            <strong>{entry.summary || 'Review event recorded.'}</strong>
+            {entry.metadata?.reason ? <div className="cell-meta">Note: {entry.metadata.reason}</div> : null}
+            {entry.metadata?.updated_count ? <div className="cell-meta">Updated answers: {formatNumber(entry.metadata.updated_count)}</div> : null}
+          </article>
+        ))
+      ) : <div className="subpanel"><div className="detail-line">No review history recorded yet.</div></div>}
+    </div>
+  )
+}
+
+function ReviewQueueInbox({ items, selectedId, onSelect }) {
+  return (
+    <div className="table-wrap review-table-wrap">
+      <table className="data-table review-data-table review-compact-table">
+        <thead>
+          <tr>
+            <th>Company / Role</th>
+            <th>Review State</th>
+            <th>Needs Attention</th>
+            <th>Next Step</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((item) => {
+            const summary = item.review_summary || {}
+            const handoff = item.manual_handoff || {}
+            return (
+              <tr
+                className={`review-row-table ${selectedId === item.application_id ? 'selected' : ''}`.trim()}
+                key={item.application_id}
+                onClick={() => onSelect(item.application_id)}
+              >
+                <td>
+                  <div className="review-cell-stack">
+                    <strong>{item.company}</strong>
+                    <div className="cell-meta">{item.title}</div>
+                    {reviewQueueSupportingMeta(item) ? <div className="cell-meta">{reviewQueueSupportingMeta(item)}</div> : null}
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={toneFor(summary.severity || item.review_status || item.status)}>{item.review_status || item.status}</Badge>
+                    <div className="cell-meta">{handoff.active ? 'Manual handoff active' : item.status || '-'}</div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={summary.blocker_count ? 'danger' : summary.warning_count ? 'warning' : handoff.active ? 'warning' : 'success'}>
+                      {reviewQueueAttentionSummary(item)}
+                    </Badge>
+                    <div className="cell-meta">
+                      {summary.unresolved_question_count
+                        ? `${formatNumber(summary.unresolved_question_count)} question${summary.unresolved_question_count === 1 ? '' : 's'} still open`
+                        : handoff.active
+                          ? `Watching ${formatNumber(handoff.pending_count || 0)} pending field${safeNumber(handoff.pending_count) === 1 ? '' : 's'}`
+                          : 'Nothing blocking right now'}
+                    </div>
+                  </div>
+                </td>
+                <td>
+                  <div className="review-cell-stack">
+                    <Badge tone={reviewActionTone(summary.next_action)}>{reviewActionLabel(summary.next_action)}</Badge>
+                    <div className="cell-meta">{summary.next_action_reason || '-'}</div>
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function ReviewMoreMenu({ onSelectAction }) {
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return undefined
+    const handlePointerDown = (event) => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [open])
+
+  return (
+    <div className="review-more-menu" ref={menuRef}>
+      <button
+        aria-expanded={open}
+        className="button button-ghost review-more-trigger"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+      >
+        More
+      </button>
+      {open ? (
+        <div className="review-more-panel">
+          <button className="button button-ghost" type="button" onClick={() => { setOpen(false); onSelectAction('mark_submitted') }}>Mark As Submitted</button>
+          <button className="button button-ghost" type="button" onClick={() => { setOpen(false); onSelectAction('reject') }}>Reject</button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ReviewDisclosure({ title, summary, open, onToggle, children }) {
+  return (
+    <section className={`review-section review-disclosure ${open ? 'open' : ''}`.trim()}>
+      <button aria-expanded={open} className="review-disclosure-toggle" type="button" onClick={onToggle}>
+        <div>
+          <strong>{title}</strong>
+          {summary ? <div className="cell-meta">{summary}</div> : null}
+        </div>
+        <span className="review-disclosure-state">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open ? <div className="review-disclosure-body">{children}</div> : null}
+    </section>
+  )
+}
+
+function ReviewQuestionsPanel({ questions, selectedId, answers, setAnswers, onSave }) {
+  const unresolved = (questions || []).filter((question) => question.needs_user_input)
+  const resolved = (questions || []).filter((question) => !question.needs_user_input)
+  const [showResolved, setShowResolved] = useState(false)
+  return (
+    <div className="detail-stack">
+      {unresolved.length ? (
+        <div className="detail-stack">
+          {unresolved.map((question) => {
+            const key = `${selectedId}::${question.question_id}`
+            const options = questionOptions(question)
+            const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(question, question.existing_answer ?? '')
+            const isCheckboxGroup = question.widget_type === 'checkbox_group' && options.length > 0
+            const isSelect = options.length > 0 && !isCheckboxGroup
+            const selectedValues = Array.isArray(value) ? value : []
+            return (
+              <div className="question-card" key={question.question_id}>
+                <div className="activity-meta">
+                  <Badge tone={question.required ? 'warning' : 'neutral'}>{question.required ? 'required' : 'optional'}</Badge>
+                  <span>{question.question_type || question.widget_type || 'question'}</span>
+                  <span>{question.verification_status || 'needs_user_input'}</span>
+                </div>
+                <strong>{question.prompt_text}</strong>
+                <div className="answer-row">
+                  {isCheckboxGroup ? (
+                    <div className="detail-stack checkbox-stack">
+                      {options.map((option) => (
+                        <label key={`${question.question_id}-${option.label}`}>
+                          <input
+                            checked={selectedValues.includes(option.label)}
+                            onChange={(event) => setAnswers((current) => {
+                              const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues
+                              const selected = Array.isArray(base) ? [...base] : []
+                              return {
+                                ...current,
+                                [key]: event.target.checked
+                                  ? dedupeStrings([...selected, option.label])
+                                  : selected.filter((entry) => entry !== option.label),
+                              }
+                            })}
+                            type="checkbox"
+                          /> {option.label}
+                        </label>
+                      ))}
+                    </div>
+                  ) : isSelect ? (
+                    <select value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}>
+                      <option value="">Select answer</option>
+                      {options.map((option) => <option key={`${question.question_id}-${option.value}-${option.label}`} value={option.label}>{option.label}</option>)}
+                    </select>
+                  ) : (
+                    <input value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder="Type answer" />
+                  )}
+                  <button className="button button-primary" type="button" onClick={() => onSave(question)}>Save Answer</button>
+                </div>
+                <div className="cell-meta">Saved answers are reused automatically the next time this prompt appears.</div>
+              </div>
+            )
+          })}
+        </div>
+      ) : <div className="detail-line">No unanswered questions right now.</div>}
+      {resolved.length ? (
+        <div className="detail-stack">
+          <button className="button button-ghost review-inline-toggle" type="button" onClick={() => setShowResolved((current) => !current)}>
+            {showResolved ? 'Hide Saved Answers' : `Show Saved Answers (${formatNumber(resolved.length)})`}
+          </button>
+          {showResolved ? (
+            <div className="detail-stack">
+              {resolved.map((question) => (
+                <div className="review-resolved-answer" key={question.question_id}>
+                  <div className="detail-line"><strong>{question.prompt_text}</strong></div>
+                  <div className="cell-meta">{question.existing_answer || 'Saved with no visible answer text.'}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ReviewNeedsAttentionPanel({ detail }) {
+  const application = detail?.application || {}
+  const summary = detail?.summary || {}
+  const blockers = detail?.blockers || []
+  const warningBlockers = blockers.filter((blocker) => blocker?.category === 'warning')
+  const primaryBlockers = blockers.filter((blocker) => blocker?.category !== 'warning')
+  const compactStats = [
+    { label: 'Questions', value: formatNumber(summary.unresolved_question_count || 0) },
+    { label: 'Missing', value: formatNumber(summary.missing_required_count || 0) },
+    { label: 'Warnings', value: formatNumber(summary.warning_count || 0) },
+  ]
+  return (
+    <section className="review-section">
+      <div className="review-section-heading">
+        <div>
+          <div className="eyebrow">Needs Attention</div>
+          <h3>What needs your attention</h3>
+        </div>
+        <Badge tone={reviewActionTone(summary.next_action)}>{reviewActionLabel(summary.next_action)}</Badge>
+      </div>
+      <p className="section-copy">{summary.next_action_reason || `Review ${application.company || 'this application'} and decide the next step.`}</p>
+      <div className="review-stat-strip">
+        {compactStats.map((item) => (
+          <div className="review-stat-pill" key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+      {primaryBlockers.length ? (
+        <div className="subpanel">
+          <div className="eyebrow">Blockers</div>
+          <div className="detail-stack">
+            {primaryBlockers.map((blocker, index) => (
+              <div className="review-chip-row" key={`${blockerLabel(blocker)}-${index}`}>
+                <Badge tone="danger">{blocker?.category || 'blocker'}</Badge>
+                <div className="cell-meta">{blockerLabel(blocker)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {warningBlockers.length ? (
+        <div className="subpanel">
+          <div className="eyebrow">Warnings</div>
+          <div className="detail-stack">
+            {warningBlockers.map((blocker, index) => (
+              <div className="review-chip-row" key={`${blockerLabel(blocker)}-${index}`}>
+                <Badge tone="warning">warning</Badge>
+                <div className="cell-meta">{blockerLabel(blocker)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {!primaryBlockers.length && !warningBlockers.length ? (
+        <div className="subpanel">
+          <div className="detail-line">Nothing is blocked right now. You can review the documents, continue with manual input, or apply.</div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function ReviewDocumentsPanel({ detail }) {
+  const artifacts = detail?.artifacts || []
+  const primaryDocuments = [
+    { label: 'Resume PDF', artifact: reviewArtifactForKinds(artifacts, 'resume_pdf') },
+    { label: 'Cover Letter PDF', artifact: reviewArtifactForKinds(artifacts, 'cover_letter_pdf') },
+    { label: 'Evaluation Report', artifact: reviewArtifactForKinds(artifacts, 'evaluation_report') },
+    { label: 'Job Posting', artifact: reviewArtifactForKinds(artifacts, 'job_posting') },
+  ]
+  const supporting = artifacts.filter((item) => item.group === 'supporting')
+  return (
+    <div className="detail-stack">
+      <div className="review-document-list">
+        {primaryDocuments.map((item) => (
+          <div className="review-document-row" key={item.label}>
+            <div>
+              <strong>{item.label}</strong>
+              <div className="cell-meta">{item.artifact?.relative_path || item.artifact?.target || `No ${item.label.toLowerCase()} recorded yet.`}</div>
+            </div>
+            <div className="review-document-actions">
+              <Badge tone={item.artifact?.exists ? 'success' : item.artifact?.external ? 'neutral' : 'warning'}>
+                {item.artifact?.exists ? 'available' : item.artifact?.external ? 'external' : 'missing'}
+              </Badge>
+              {item.artifact?.href ? <a href={item.artifact.href} rel="noreferrer" target="_blank">Open</a> : null}
+            </div>
+          </div>
+        ))}
+      </div>
+      {supporting.length ? (
+        <div className="subpanel">
+          <div className="eyebrow">Additional Sources</div>
+          <div className="detail-stack">
+            {supporting.map((artifact) => (
+              <div className="detail-line" key={`${artifact.kind}-${artifact.target}`}>
+                <strong>{artifact.label}:</strong> {artifact.href ? <a href={artifact.href} rel="noreferrer" target="_blank">Open</a> : artifact.relative_path || artifact.target || 'Recorded'}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ReviewManualHandoffPanel({ manualHandoffWatch }) {
+  const recentAnswers = manualHandoffWatch?.recent_answers || []
+  const [showChanges, setShowChanges] = useState(false)
+  return (
+    <div className="detail-stack">
+      <div className="review-stat-strip">
+        <div className="review-stat-pill"><span>Status</span><strong>{manualHandoffWatch?.status || (manualHandoffWatch?.active ? 'watching' : 'idle')}</strong></div>
+        <div className="review-stat-pill"><span>Last Sync</span><strong>{manualHandoffWatch?.last_synced_at ? formatDate(manualHandoffWatch.last_synced_at) : '-'}</strong></div>
+        <div className="review-stat-pill"><span>Learned</span><strong>{formatNumber(manualHandoffWatch?.synced_question_count || 0)}</strong></div>
+      </div>
+      <div className="subpanel">
+        <div className="eyebrow">Tracked Page</div>
+        {manualHandoffWatch?.last_page_url ? (
+          <a href={manualHandoffWatch.last_page_url} rel="noreferrer" target="_blank">{manualHandoffWatch.last_page_url}</a>
+        ) : <div className="detail-line">No parked browser page URL recorded yet.</div>}
+      </div>
+      <div className="detail-line">
+        {manualHandoffWatch?.active
+          ? `The parked application is still being watched. ${formatNumber(manualHandoffWatch?.pending_count || 0)} text field${safeNumber(manualHandoffWatch?.pending_count) === 1 ? '' : 's'} are still settling.`
+          : 'No active manual handoff session is being watched right now.'}
+      </div>
+      {recentAnswers.length ? (
+        <div className="detail-stack">
+          <button className="button button-ghost review-inline-toggle" type="button" onClick={() => setShowChanges((current) => !current)}>
+            {showChanges ? 'Hide Learned Changes' : `Show Learned Changes (${formatNumber(recentAnswers.length)})`}
+          </button>
+          {showChanges ? (
+            <div className="table-wrap">
+              <table className="data-table review-data-table handoff-change-table">
+                <thead>
+                  <tr>
+                    <th>Question</th>
+                    <th>Previous</th>
+                    <th>New</th>
+                    <th>Change Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentAnswers.map((item, index) => (
+                    <tr key={`${item.question_id || item.prompt_text}-${index}`}>
+                      <td>{item.prompt_text || item.question_id || '-'}</td>
+                      <td>{item.previous_answer || '-'}</td>
+                      <td>{item.answer_text || '-'}</td>
+                      <td><Badge tone={item.filled_blank ? 'success' : 'warning'}>{item.change_type || (item.filled_blank ? 'filled_blank' : 'corrected_answer')}</Badge></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function ReviewAdvancedPanel({ detail }) {
+  const history = detail?.history || []
+  const summary = detail?.summary || {}
+  const reportMarkdown = detail?.report_markdown || ''
+  return (
+    <div className="detail-stack">
+      <div className="subpanel">
+        <div className="eyebrow">Screening And Classification</div>
+        <div className="detail-stack">
+          <div className="detail-line">Screening: {summary.screening_status || detail?.job?.screening_status || '-'}</div>
+          <div className="detail-line">ATS family: {summary.classification?.ats_family || detail?.job?.ats_family || '-'}</div>
+          <div className="detail-line">Board family: {summary.classification?.board_family || detail?.job?.board_family || '-'}</div>
+          <div className="detail-line">Automation tier: {summary.classification?.automation_tier || detail?.job?.automation_tier || '-'}</div>
+          <div className="detail-line">Low confidence answers: {formatNumber(summary.low_confidence_count || 0)}</div>
+          <div className="detail-line">Ungrounded answers: {formatNumber(summary.ungrounded_count || 0)}</div>
+          {summary.hard_reject_reason ? <div className="detail-line">Hard reject reason: {summary.hard_reject_reason}</div> : null}
+          {summary.auth_reject_reason ? <div className="detail-line">Auth reject reason: {summary.auth_reject_reason}</div> : null}
+        </div>
+      </div>
+      {history.length ? (
+        <div className="detail-stack">
+          {history.map((entry, index) => (
+            <article className="activity-item" key={`${entry.timestamp || index}-${entry.type || index}`}>
+              <div className="activity-meta">
+                <Badge tone={toneFor(entry.type || entry.summary)}>{entry.type || 'review.event'}</Badge>
+                <span>{entry.actor || 'operator'}</span>
+                <span>{entry.timestamp ? formatDate(entry.timestamp) : '-'}</span>
+              </div>
+              <strong>{entry.summary || 'Review event recorded.'}</strong>
+              {entry.metadata?.reason ? <div className="cell-meta">Note: {entry.metadata.reason}</div> : null}
+              {entry.metadata?.updated_count ? <div className="cell-meta">Updated answers: {entry.metadata.updated_count}</div> : null}
+            </article>
+          ))}
+        </div>
+      ) : <div className="subpanel"><div className="detail-line">No review history recorded yet.</div></div>}
+      <div className="subpanel">
+        <div className="eyebrow">Report Output</div>
+        <pre className="report-block">{reportMarkdown || 'No report available.'}</pre>
+      </div>
+    </div>
+  )
+}
+
+function ReviewPage({ live }) {
   const review = usePolledJson('/api/review/queue', 7000)
   const [searchParams, setSearchParams] = useSearchParams()
   const selectedId = searchParams.get('application_id') || ''
+  const activeSectionFromUrl = reviewSectionFromTab(searchParams.get('tab'))
   const detail = usePolledJson(selectedId ? `/api/applications/${selectedId}` : '/api/review/queue?limit=1', 7000)
   const [notice, setNotice] = useState('')
   const [answers, setAnswers] = useState({})
+  const [queueSearch, setQueueSearch] = useState('')
+  const [queueFilter, setQueueFilter] = useState('all')
+  const [confirmAction, setConfirmAction] = useState('')
+  const [actionNote, setActionNote] = useState('')
+  const [sectionOverrides, setSectionOverrides] = useState({})
+  const searchInputRef = useRef(null)
   const reviewItems = review.data?.items || []
+  const manualHandoffWatch = detail.data?.manual_handoff_watch || detail.data?.submission?.result?.manual_handoff_watch || {}
+  const unresolvedQuestions = (detail.data?.questions || []).filter((question) => question.needs_user_input)
+  const handoffRecentlyActive = Boolean(manualHandoffWatch?.active || manualHandoffWatch?.last_synced_at || (manualHandoffWatch?.recent_answers || []).length)
+  const sectionDefaults = useMemo(() => ({
+    questions: activeSectionFromUrl === 'questions' || unresolvedQuestions.length > 0,
+    documents: activeSectionFromUrl === 'documents',
+    handoff: activeSectionFromUrl === 'handoff' || handoffRecentlyActive,
+    advanced: activeSectionFromUrl === 'advanced',
+  }), [activeSectionFromUrl, handoffRecentlyActive, unresolvedQuestions.length])
+
+  const filteredItems = useMemo(() => {
+    return [...reviewItems]
+      .filter((item) => queueMatchesSearch(item, queueSearch))
+      .filter((item) => reviewQueueMatchesFilter(item, queueFilter))
+      .sort(reviewSortComparator())
+  }, [queueFilter, queueSearch, reviewItems])
+
+  const queueCounts = useMemo(() => ({
+    all: reviewItems.length,
+    needs_input: reviewItems.filter((item) => reviewQueueMatchesFilter(item, 'needs_input')).length,
+    manual_handoff: reviewItems.filter((item) => reviewQueueMatchesFilter(item, 'manual_handoff')).length,
+    ready: reviewItems.filter((item) => reviewQueueMatchesFilter(item, 'ready')).length,
+  }), [reviewItems])
+
+  function setReviewParam(key, value) {
+    const nextParams = new URLSearchParams(searchParams)
+    if (value) nextParams.set(key, value)
+    else nextParams.delete(key)
+    setSearchParams(nextParams, { replace: true })
+  }
 
   function selectApplication(applicationId) {
-    const nextParams = new URLSearchParams(searchParams)
-    if (applicationId) nextParams.set('application_id', applicationId)
-    else nextParams.delete('application_id')
-    setSearchParams(nextParams, { replace: true })
+    setReviewParam('application_id', applicationId)
+  }
+
+  function openConfirm(action) {
+    setConfirmAction(action)
+    setActionNote('')
+  }
+
+  function isSectionOpen(sectionKey) {
+    if (Object.prototype.hasOwnProperty.call(sectionOverrides, sectionKey)) return sectionOverrides[sectionKey]
+    return sectionDefaults[sectionKey] || false
+  }
+
+  function toggleSection(sectionKey) {
+    const nextOpen = !isSectionOpen(sectionKey)
+    setSectionOverrides((current) => ({ ...current, [sectionKey]: nextOpen }))
+    if (nextOpen) {
+      const tab = reviewTabForSection(sectionKey)
+      setReviewParam('tab', tab === 'summary' ? '' : tab)
+      return
+    }
+    if (activeSectionFromUrl === sectionKey) {
+      setReviewParam('tab', '')
+    }
   }
 
   useEffect(() => {
     if (!review.data) return
-    const queueIds = reviewItems.map((item) => item.application_id)
+    const queueIds = filteredItems.map((item) => item.application_id)
     if (!queueIds.length) {
       if (selectedId) selectApplication('')
       return
     }
     if (!selectedId || !queueIds.includes(selectedId)) {
-      selectApplication(reviewItems[0].application_id)
+      selectApplication(queueIds[0])
     }
-  }, [reviewItems, searchParams, selectedId, setSearchParams])
+  }, [filteredItems, selectedId, review.data])
 
-  async function takeAction(action) {
+  useEffect(() => {
+    setSectionOverrides({})
+  }, [selectedId])
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (isEditableShortcutTarget(event.target)) return
+      if (!filteredItems.length) return
+      const currentIndex = Math.max(0, filteredItems.findIndex((item) => item.application_id === selectedId))
+      if (event.key === '/') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+        return
+      }
+      if (event.key === 'j') {
+        event.preventDefault()
+        selectApplication(filteredItems[Math.min(currentIndex + 1, filteredItems.length - 1)]?.application_id || filteredItems[0].application_id)
+        return
+      }
+      if (event.key === 'k') {
+        event.preventDefault()
+        selectApplication(filteredItems[Math.max(currentIndex - 1, 0)]?.application_id || filteredItems[0].application_id)
+        return
+      }
+      if (!selectedId) return
+      if (event.key === 'a') void takeAction('approve')
+      if (event.key === 'o') void takeAction('request_input')
+      if (event.key === 's') void takeAction('sync_manual_input')
+      if (event.key === 'm') openConfirm('mark_submitted')
+      if (event.key === 'r') openConfirm('reject')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [filteredItems, selectedId])
+
+  async function takeAction(action, reason = '') {
     if (!selectedId) return
     try {
       const result = await requestJson('/api/review/action', {
         method: 'POST',
-        body: JSON.stringify({ application_id: selectedId, action }),
+        body: JSON.stringify({ application_id: selectedId, action, reason: reason || undefined }),
         timeoutMs: 120_000,
       })
-      if (result?.manual_submitted) {
+      if (action === 'sync_manual_input') {
+        if (!result?.page_found) {
+          setNotice('Could not find an open parked application tab to sync yet. Open the manual handoff page first, then retry.')
+        } else if (result?.synced_count) {
+          const filledBlankCount = Number(result?.filled_blank_count || 0)
+          const correctedAnswerCount = Number(result?.corrected_answer_count || 0)
+          setNotice(`Synced ${result.synced_count} browser answer${result.synced_count === 1 ? '' : 's'}. ${filledBlankCount} filled blank field${filledBlankCount === 1 ? '' : 's'}, ${correctedAnswerCount} corrected existing answer${correctedAnswerCount === 1 ? '' : 's'}.`)
+        } else {
+          setNotice('Checked the parked application page. There are no new manual answers to save yet.')
+        }
+      } else if (result?.manual_submitted) {
         setNotice('Marked this application as submitted. It now counts toward submitted totals and leaves the review queue.')
+      } else if (action === 'reject') {
+        setNotice('Rejected this application and removed it from the active review queue.')
       } else if (result?.manual_handoff_opened && action === 'request_input') {
         setNotice('Opened the partially filled application for manual completion. No submit attempt was made.')
       } else if (result?.manual_handoff_opened) {
@@ -2022,8 +3177,10 @@ function ReviewPage({ operator, live }) {
       } else if (result?.blocked) {
         setNotice('Submission is still blocked. The page could not be kept open automatically, so answer the saved blockers here and retry.')
       } else {
-        setNotice(`Review action applied: ${action}`)
+        setNotice(`Review action applied: ${reviewActionLabel(action)}`)
       }
+      setConfirmAction('')
+      setActionNote('')
       const refreshedQueue = await review.refresh()
       const refreshedItems = refreshedQueue?.items || []
       const selectedStillPresent = refreshedItems.some((item) => item.application_id === selectedId)
@@ -2074,21 +3231,114 @@ function ReviewPage({ operator, live }) {
 
   return (
     <div className="page-grid review-grid">
-      <Section eyebrow="Review Queue" title="Applications Needing Oversight" description="Preview failures, unresolved blockers, and manual approval flow."><CurrentProcessPanel operator={operator} compact /><DataState error={review.error} loading={review.loading} empty={!reviewItems.length} emptyLabel="No review items." emptyDetail="Discovery and drafting must create application records before review can begin."><div className="review-list">{reviewItems.map((item) => <button className={`review-row ${selectedId === item.application_id ? 'selected' : ''}`} key={item.application_id} type="button" onClick={() => selectApplication(item.application_id)}><div><strong>{item.company}</strong><div className="cell-meta">{item.title}</div></div><Badge tone={toneFor(item.review_status || item.status)}>{item.review_status || item.status}</Badge></button>)}</div></DataState></Section>
-      <Section eyebrow="Application Detail" title="Selected Application" description="Review status, blockers, questions, and report output."><DataState error={detail.error} loading={detail.loading} empty={!detail.data?.application} emptyLabel="Choose an application." emptyDetail="Select an application from the review queue to inspect details."><InlineNotice message={notice} tone={toneFor(notice)} /><div className="detail-stack"><div className="detail-line"><strong>{detail.data?.application?.company}</strong> / {detail.data?.application?.role}</div><div className="tag-row"><Badge tone={toneFor(detail.data?.application?.status)}>{detail.data?.application?.status || '-'}</Badge><Badge tone={toneFor(detail.data?.submission?.status)}>{detail.data?.submission?.status || 'not_prepared'}</Badge><Badge tone="neutral">{detail.data?.application?.source || '-'}</Badge></div><div className="action-row"><button className="button button-primary" type="button" onClick={() => takeAction('approve')}>Approve / Apply</button><button className="button button-ghost" type="button" onClick={() => takeAction('request_input')}>Open For Manual Input</button><button className="button button-ghost" type="button" onClick={() => takeAction('mark_submitted')}>Mark As Submitted</button><button className="button button-ghost" type="button" onClick={() => takeAction('reject')}>Reject</button></div><div className="cell-meta">Approve / Apply only submits when no blockers remain. Open For Manual Input always opens a partial form for you to finish without submitting. Mark As Submitted records a manual submission you already completed yourself.</div><div className="subpanel"><div className="eyebrow">Blockers</div>{(detail.data?.blockers || []).length ? <div className="detail-stack">{(detail.data?.blockers || []).map((blocker, index) => <div className="detail-line" key={`${blockerLabel(blocker)}-${index}`}>{blockerLabel(blocker)}</div>)}</div> : <div className="detail-line">No blockers recorded.</div>}</div><div className="subpanel"><div className="eyebrow">Questions</div>{(detail.data?.questions || []).length ? <div className="detail-stack">{(detail.data?.questions || []).filter((question) => question.needs_user_input).map((question) => { const key = `${selectedId}::${question.question_id}`; const options = questionOptions(question); const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(question, question.existing_answer ?? ''); const isCheckboxGroup = question.widget_type === 'checkbox_group' && options.length > 0; const isSelect = options.length > 0 && !isCheckboxGroup; const selectedValues = Array.isArray(value) ? value : []; return <div className="question-card" key={question.question_id}><strong>{question.prompt_text}</strong><div className="answer-row">{isCheckboxGroup ? <div className="detail-stack">{options.map((option) => <label key={`${question.question_id}-${option.label}`}><input checked={selectedValues.includes(option.label)} onChange={(event) => setAnswers((current) => { const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues; const selected = Array.isArray(base) ? [...base] : []; return { ...current, [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter((entry) => entry !== option.label) } })} type="checkbox" /> {option.label}</label>)}</div> : isSelect ? <select value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))}><option value="">Select answer</option>{options.map((option) => <option key={`${question.question_id}-${option.value}-${option.label}`} value={option.label}>{option.label}</option>)}</select> : <input value={String(value ?? '')} onChange={(event) => setAnswers((current) => ({ ...current, [key]: event.target.value }))} placeholder="Type answer" />}<button className="button button-primary" type="button" onClick={() => submitReviewAnswer(question)}>Save Answer</button></div><div className="cell-meta">Saved answers are reused automatically the next time this prompt appears.</div></div> })}{!(detail.data?.questions || []).some((question) => question.needs_user_input) ? <div className="detail-line">No unresolved questions.</div> : null}{(detail.data?.questions || []).filter((question) => !question.needs_user_input).map((question) => <div className="detail-line" key={question.question_id}>{question.prompt_text}{question.existing_answer ? `: ${question.existing_answer}` : ''}</div>)}</div> : <div className="detail-line">No questions captured.</div>}</div><div className="subpanel"><div className="eyebrow">Report</div><pre className="report-block">{detail.data?.report_markdown || 'No report available.'}</pre></div></div></DataState></Section>
+      <Section eyebrow="Review Queue" title="Applications To Review" description="A compact inbox for the applications that still need your attention.">
+        <DataState error={review.error} loading={review.loading} empty={!reviewItems.length} emptyLabel="No review items." emptyDetail="Discovery and drafting must create application records before review can begin.">
+          <div className="section-stack">
+            <div className="review-queue-controls">
+              <label className="review-search">
+                <span>Search</span>
+                <input ref={searchInputRef} value={queueSearch} onChange={(event) => setQueueSearch(event.target.value)} placeholder="Search company, role, blocker, or next step" />
+              </label>
+              <div className="review-filter-row" aria-label="Review queue filters">
+                {REVIEW_QUEUE_FILTERS.map((item) => (
+                  <button
+                    className={`review-filter-pill ${queueFilter === item.key ? 'active' : ''}`.trim()}
+                    key={item.key}
+                    type="button"
+                    onClick={() => setQueueFilter(item.key)}
+                  >
+                    {item.label} <span>{formatNumber(queueCounts[item.key] || 0)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="cell-meta">Showing {formatNumber(filteredItems.length)} of {formatNumber(reviewItems.length)} applications.</div>
+            <DataState error="" loading={false} empty={!filteredItems.length} emptyLabel="No filtered review items." emptyDetail="Adjust the search or queue filters to show more applications.">
+              <ReviewQueueInbox items={filteredItems} selectedId={selectedId} onSelect={selectApplication} />
+            </DataState>
+          </div>
+        </DataState>
+      </Section>
+      <Section eyebrow="Review Workspace" title="Selected Application" description="A focused workspace for clearing blockers, finishing handoffs, and moving the application forward.">
+        <DataState error={detail.error} loading={detail.loading} empty={!detail.data?.application} emptyLabel="Choose an application." emptyDetail="Select an application from the review queue to inspect details.">
+          <InlineNotice message={notice} tone={toneFor(notice)} />
+          <div className="review-detail-shell">
+            <div className="review-detail-header review-summary-card">
+              <div className="review-detail-title">
+                <div className="eyebrow">Application Summary</div>
+                <h3>{detail.data?.application?.company} / {detail.data?.application?.role}</h3>
+                <p className="section-copy">{detail.data?.summary?.next_action_reason || 'Review the open questions and decide whether to continue, hand off, or apply.'}</p>
+              </div>
+              <div className="review-header-metrics">
+                <div className="review-header-line">
+                  <Badge tone={toneFor(detail.data?.summary?.severity || detail.data?.application?.status)}>{detail.data?.application?.status || '-'}</Badge>
+                  <Badge tone={toneFor(detail.data?.submission?.status)}>{detail.data?.submission?.status || 'not_prepared'}</Badge>
+                  {reviewSourceMeta(detail.data) ? <Badge tone="neutral">{reviewSourceMeta(detail.data)}</Badge> : null}
+                </div>
+                {detail.data?.application?.score != null || detail.data?.application?.grade ? (
+                  <div className="cell-meta">
+                    {[
+                      detail.data?.application?.score != null ? `Score ${detail.data.application.score}` : '',
+                      detail.data?.application?.grade ? `Grade ${detail.data.application.grade}` : '',
+                    ].filter(Boolean).join(' / ')}
+                  </div>
+                ) : null}
+              </div>
+              <div className="review-action-bar">
+                <button className="button button-primary" type="button" onClick={() => takeAction('approve')}>Approve / Apply</button>
+                <button className="button button-ghost" type="button" onClick={() => takeAction('request_input')}>Open For Manual Input</button>
+                <button className="button button-ghost" type="button" onClick={() => takeAction('sync_manual_input')}>Sync Browser Changes</button>
+                <ReviewMoreMenu onSelectAction={openConfirm} />
+              </div>
+              {confirmAction ? <div className="review-confirm-panel"><div className="eyebrow">{reviewActionLabel(confirmAction)}</div><textarea rows="3" value={actionNote} onChange={(event) => setActionNote(event.target.value)} placeholder={confirmAction === 'mark_submitted' ? 'Optional note about how you submitted it manually' : 'Optional note about why this application is being rejected'} /><div className="action-row"><button className="button button-primary" type="button" onClick={() => takeAction(confirmAction, actionNote)}>{confirmAction === 'mark_submitted' ? 'Confirm Manual Submission' : 'Confirm Reject'}</button><button className="button button-ghost" type="button" onClick={() => { setConfirmAction(''); setActionNote('') }}>Cancel</button></div></div> : null}
+              <div className="cell-meta">Use manual input when the form is mostly filled and just needs your help. Sync afterward to save what you entered for reuse.</div>
+            </div>
+            <ReviewNeedsAttentionPanel detail={detail.data} />
+            <ReviewDisclosure
+              title="Questions"
+              summary={unresolvedQuestions.length ? `${formatNumber(unresolvedQuestions.length)} answer${unresolvedQuestions.length === 1 ? '' : 's'} still need your input.` : 'Review saved answers or add anything still missing.'}
+              open={isSectionOpen('questions')}
+              onToggle={() => toggleSection('questions')}
+            >
+              <ReviewQuestionsPanel questions={detail.data?.questions || []} selectedId={selectedId} answers={answers} setAnswers={setAnswers} onSave={submitReviewAnswer} />
+            </ReviewDisclosure>
+            <ReviewDisclosure
+              title="Documents & Links"
+              summary="Open the generated documents, evaluation report, and the original job posting."
+              open={isSectionOpen('documents')}
+              onToggle={() => toggleSection('documents')}
+            >
+              <ReviewDocumentsPanel detail={detail.data} />
+            </ReviewDisclosure>
+            <ReviewDisclosure
+              title="Manual Handoff"
+              summary={handoffRecentlyActive ? 'A manual handoff is active or was recently synced.' : 'Only open this when you need manual takeover details.'}
+              open={isSectionOpen('handoff')}
+              onToggle={() => toggleSection('handoff')}
+            >
+              <ReviewManualHandoffPanel manualHandoffWatch={manualHandoffWatch} />
+            </ReviewDisclosure>
+            <ReviewDisclosure
+              title="Advanced"
+              summary="History, diagnostics, and lower-level review context."
+              open={isSectionOpen('advanced')}
+              onToggle={() => toggleSection('advanced')}
+            >
+              <ReviewAdvancedPanel detail={detail.data} />
+            </ReviewDisclosure>
+          </div>
+        </DataState>
+      </Section>
     </div>
   )
 }
 
-function RunsPage() {
-  const runs = usePolledJson('/api/runs/history', 9000)
-  const runItems = runs.data?.items || []
-  return <div className="page-stack"><Section eyebrow="Runs" title="Operational History" description="Recent discover, daily, and autonomous runs with compact metrics."><DataState error={runs.error} loading={runs.loading} empty={!runItems.length} emptyLabel="No runs recorded yet."><div className="runs-list">{runItems.map((run) => <article className="finding-card" key={run.run_id}><div className="activity-meta"><Badge tone={toneFor(run.status)}>{run.status}</Badge><span>{run.run_type}</span><span>{formatDate(run.completed_at || run.started_at)}</span></div><strong>{run.run_id}</strong><div className="detail-line">submitted {(run.submitted_count ?? run.submitted_application_ids?.length) || 0} / failed {(run.failed_count ?? run.failed_application_ids?.length) || 0}</div><div className="detail-line">processed {(run.processed_count ?? run.processed_job_ids?.length) || 0} / evaluated {(run.evaluated_count ?? run.evaluated_application_ids?.length) || 0}</div></article>)}</div></DataState></Section></div>
-}
 
-function Layout({ operator, children }) {
+
+function Layout({ children }) {
   const location = useLocation()
-  return <div className="app-shell"><header className="topbar"><div><div className="brand-mark">Find My Job</div><h1>Operator Console</h1></div><nav className="topnav">{NAV_ITEMS.map((item) => <Link className={location.pathname === item.to ? 'active' : ''} key={item.to} to={item.to}>{item.label}</Link>)}</nav></header><OperatorRail operator={operator} /><main className="page-shell">{children}</main></div>
+  const activePath = navPathForLocation(location.pathname)
+  return <div className="app-shell"><header className="topbar"><div><div className="brand-mark">Find My Job</div><h1>Operator Console</h1></div><nav className="topnav">{NAV_ITEMS.map((item) => <Link className={activePath === item.to ? 'active' : ''} key={item.to} to={item.to}>{item.label}</Link>)}</nav></header><main className="page-shell">{children}</main></div>
 }
 
 export function App() {
@@ -2096,19 +3346,19 @@ export function App() {
   const operator = useMemo(() => deriveOperatorState(live.snapshot, live.connection, live.lastSnapshotAt), [live.connection, live.lastSnapshotAt, live.snapshot])
 
   return (
-    <Layout operator={operator}>
+    <Layout>
       <Routes>
         <Route path="/" element={<DashboardPage operator={operator} live={live} />} />
-        <Route path="/setup" element={<SetupPage />} />
+        <Route path="/setup" element={<Navigate to="/settings" replace />} />
         <Route path="/settings" element={<SettingsPage />} />
         <Route path="/autopilot" element={<AutopilotPage operator={operator} live={live} />} />
         <Route path="/daily" element={<AutopilotPage operator={operator} live={live} />} />
         <Route path="/review" element={<ReviewPage operator={operator} live={live} />} />
-        <Route path="/runs" element={<RunsPage />} />
-        <Route path="/training" element={<RunsPage />} />
+        <Route path="/runs" element={<Navigate to="/" replace />} />
+        <Route path="/training" element={<Navigate to="/" replace />} />
       </Routes>
     </Layout>
   )
 }
 
-export { AutopilotPage, DashboardPage, ReviewPage, RunsPage, SettingsPage, SetupPage, requestJson }
+export { AutopilotPage, DashboardPage, ReviewPage, SettingsPage, requestJson }

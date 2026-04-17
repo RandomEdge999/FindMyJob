@@ -35361,6 +35361,49 @@ function logV6DeprecationWarnings(renderFuture, routerFuture) {
   }
 }
 /**
+ * Changes the current location.
+ *
+ * Note: This API is mostly useful in React.Component subclasses that are not
+ * able to use hooks. In functional components, we recommend you use the
+ * `useNavigate` hook instead.
+ *
+ * @see https://reactrouter.com/v6/components/navigate
+ */
+function Navigate(_ref4) {
+  let {
+    to,
+    replace,
+    state,
+    relative
+  } = _ref4;
+  !useInRouterContext() ? process.env.NODE_ENV !== "production" ? invariant(false, // TODO: This error is probably because they somehow have 2 versions of
+  // the router loaded. We can help them understand how to avoid that.
+  "<Navigate> may be used only in the context of a <Router> component.") : invariant(false) : void 0;
+  let {
+    future,
+    static: isStatic
+  } = reactExports.useContext(NavigationContext);
+  process.env.NODE_ENV !== "production" ? warning(!isStatic, "<Navigate> must not be used on the initial render in a <StaticRouter>. " + "This is a no-op, but you should modify your code so the <Navigate> is " + "only ever rendered in response to some user interaction or state change.") : void 0;
+  let {
+    matches
+  } = reactExports.useContext(RouteContext);
+  let {
+    pathname: locationPathname
+  } = useLocation();
+  let navigate = useNavigate();
+
+  // Resolve the path outside of the effect so that when effects run twice in
+  // StrictMode they navigate to the same place
+  let path = resolveTo(to, getResolveToMatches(matches, future.v7_relativeSplatPath), locationPathname, relative === "path");
+  let jsonPath = JSON.stringify(path);
+  reactExports.useEffect(() => navigate(JSON.parse(jsonPath), {
+    replace,
+    state,
+    relative
+  }), [navigate, jsonPath, relative, replace, state]);
+  return null;
+}
+/**
  * Declares an element that should be rendered at a certain URL path.
  *
  * @see https://reactrouter.com/v6/components/route
@@ -37653,21 +37696,18 @@ const NAV_ITEMS = [{
   label: 'Dashboard',
   to: '/'
 }, {
-  label: 'Setup',
-  to: '/setup'
-}, {
-  label: 'Settings',
-  to: '/settings'
-}, {
   label: 'Autopilot',
   to: '/autopilot'
 }, {
   label: 'Review',
   to: '/review'
 }, {
-  label: 'Runs',
-  to: '/runs'
+  label: 'Settings',
+  to: '/settings'
 }];
+const NAV_ROUTE_ALIASES = {
+  '/daily': '/autopilot'
+};
 const STAGE_LABELS = {
   idle: 'Idle',
   queue: 'Queue',
@@ -37804,6 +37844,9 @@ function usePolledJson(url, intervalMs = 5000) {
     loading,
     refresh
   };
+}
+function navPathForLocation(pathname) {
+  return NAV_ROUTE_ALIASES[pathname] || pathname;
 }
 function normalizeChoice(value) {
   return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -38044,7 +38087,7 @@ function describeDraftBatch(batch, configuredTarget) {
   const memberCount = safeNumber(batch?.member_count);
   if (!memberCount) return 'no active draft batch';
   const targetSize = safeNumber(batch?.target_size || memberCount);
-  const configured = safeNumber(configuredTarget || targetSize);
+  const configured = safeNumber(configuredTarget);
   const baseStatus = batch?.handoff_status || batch?.status || 'waiting_for_batch';
   if (configured > targetSize) {
     return `only ${formatNumber(targetSize)} approved job${targetSize === 1 ? '' : 's'} were available; configured target ${formatNumber(configured)}. ${baseStatus}`;
@@ -38212,6 +38255,37 @@ function Section({
     }), children]
   });
 }
+function ConsoleDisclosure({
+  title,
+  summary,
+  open,
+  onToggle,
+  children
+}) {
+  return jsxRuntimeExports.jsxs("section", {
+    className: `console-disclosure ${open ? 'open' : ''}`.trim(),
+    children: [jsxRuntimeExports.jsxs("button", {
+      "aria-expanded": open,
+      className: "console-disclosure-toggle",
+      type: "button",
+      onClick: onToggle,
+      children: [jsxRuntimeExports.jsxs("div", {
+        children: [jsxRuntimeExports.jsx("strong", {
+          children: title
+        }), summary ? jsxRuntimeExports.jsx("div", {
+          className: "cell-meta",
+          children: summary
+        }) : null]
+      }), jsxRuntimeExports.jsx("span", {
+        className: "console-disclosure-state",
+        children: open ? 'Hide' : 'Show'
+      })]
+    }), open ? jsxRuntimeExports.jsx("div", {
+      className: "console-disclosure-body",
+      children: children
+    }) : null]
+  });
+}
 function MetricGrid({
   items,
   className = ''
@@ -38280,236 +38354,48 @@ function DataState({
   }
   return children;
 }
-function OperatorRail({
-  operator
+function ActivityFeed({
+  events
 }) {
-  return jsxRuntimeExports.jsxs("section", {
-    className: "operator-rail panel",
-    children: [jsxRuntimeExports.jsxs("div", {
-      children: [jsxRuntimeExports.jsx("div", {
-        className: "eyebrow",
-        children: "Live Operator State"
-      }), jsxRuntimeExports.jsx("h2", {
-        children: operator.isRunning ? `${operator.runType} / ${STAGE_LABELS[operator.stage] || operator.stage}` : 'No active run'
-      }), jsxRuntimeExports.jsx("p", {
-        children: operator.latestMessage
-      })]
-    }), jsxRuntimeExports.jsxs("div", {
-      className: "operator-rail-meta",
-      children: [jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Stream"
+  return jsxRuntimeExports.jsx("div", {
+    className: "activity-feed",
+    children: events.map(event => {
+      const chips = summarizeEventPayload(event.payload);
+      return jsxRuntimeExports.jsxs("article", {
+        className: "activity-item",
+        children: [jsxRuntimeExports.jsxs("div", {
+          className: "activity-meta",
+          children: [jsxRuntimeExports.jsx(Badge, {
+            tone: toneFor(event.status),
+            children: badgeText(event.status)
+          }), jsxRuntimeExports.jsx(Badge, {
+            tone: "neutral",
+            children: event.phase || event.stage || 'event'
+          }), jsxRuntimeExports.jsx("span", {
+            children: event.event_type
+          }), jsxRuntimeExports.jsx("span", {
+            children: formatDate(event.created_at)
+          })]
         }), jsxRuntimeExports.jsx("strong", {
-          children: operator.streamHealth
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Status"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.status
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item wide",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Current target"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.currentTitle
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Elapsed"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.elapsed
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Last update"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.lastSeen
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "operator-meta-item wide",
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Model"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.modelBadge
-        })]
-      })]
-    }), jsxRuntimeExports.jsxs("div", {
-      className: "operator-rail-badges",
-      children: [jsxRuntimeExports.jsx(Badge, {
-        tone: toneForStream(operator.streamHealth),
-        children: operator.streamHealth
-      }), jsxRuntimeExports.jsx(Badge, {
-        tone: toneFor(operator.status),
-        children: operator.status
-      })]
-    })]
-  });
-}
-function CurrentProcessPanel({
-  operator,
-  compact = false
-}) {
-  const discoveryProgress = operator.counters.discoveryBoardsTotal ? `${formatNumber(operator.counters.discoveryBoardsCompleted)} / ${formatNumber(operator.counters.discoveryBoardsTotal)}` : '-';
-  const draftBatch = operator.draftBatch || {};
-  const draftBatchSize = safeNumber(draftBatch.member_count);
-  const draftBatchProgress = draftBatchSize ? `${formatNumber(draftBatch.completed_count || 0)} / ${formatNumber(draftBatch.member_count || 0)}` : '-';
-  const activeDraftTabs = safeNumber(draftBatch.active_worker_count || draftBatch.active_count);
-  const draftBatchNote = describeDraftBatch(draftBatch, operator.readyThreshold);
-  const counters = [{
-    label: 'Discovered',
-    value: formatNumber(operator.counters.discovered),
-    note: 'jobs retained in workspace'
-  }, {
-    label: 'Screened Out',
-    value: formatNumber(operator.counters.screenedOut),
-    note: 'rejected during screening'
-  }, {
-    label: 'Evaluated',
-    value: formatNumber(operator.counters.evaluated),
-    note: 'application records created'
-  }, {
-    label: 'Drafted',
-    value: formatNumber(operator.counters.drafted),
-    note: 'artifacts generated'
-  }, {
-    label: 'Ready',
-    value: formatNumber(operator.counters.readyToApply),
-    note: 'actually ready to apply'
-  }, {
-    label: 'Blocked',
-    value: formatNumber(operator.counters.blockedByQuestions),
-    note: 'waiting on manual answers'
-  }, {
-    label: 'Submitted',
-    value: formatNumber(operator.counters.submitted),
-    note: 'successful submissions'
-  }, {
-    label: 'Failed',
-    value: formatNumber(operator.counters.failed),
-    note: 'run failures'
-  }];
-  return jsxRuntimeExports.jsxs("article", {
-    className: `process-panel panel ${compact ? 'compact' : ''}`.trim(),
-    children: [jsxRuntimeExports.jsxs("div", {
-      className: "process-head",
-      children: [jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("div", {
-          className: "eyebrow",
-          children: "Current Process"
-        }), jsxRuntimeExports.jsx("h3", {
-          children: operator.isRunning ? `${operator.runType} / ${STAGE_LABELS[operator.stage] || operator.stage}` : 'No active run'
-        }), jsxRuntimeExports.jsx("p", {
-          children: operator.latestMessage
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        className: "process-badges",
-        children: [jsxRuntimeExports.jsx(Badge, {
-          tone: toneForStream(operator.streamHealth),
-          children: operator.streamHealth
-        }), jsxRuntimeExports.jsx(Badge, {
-          tone: toneFor(operator.status),
-          children: operator.status
-        })]
-      })]
-    }), jsxRuntimeExports.jsxs("div", {
-      className: "process-meta-grid",
-      children: [jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Company / role"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.currentTitle
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Stage"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: STAGE_LABELS[operator.stage] || operator.stage
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Elapsed"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.elapsed
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Last update"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.lastSeen
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Discovery boards"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: discoveryProgress
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Draft batch"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: draftBatchProgress
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Active tabs"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: draftBatchSize ? formatNumber(activeDraftTabs) : '-'
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Temp chat"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.temporaryChatStatus || '-'
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Model role"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.modelRole || '-'
-        })]
-      }), jsxRuntimeExports.jsxs("div", {
-        children: [jsxRuntimeExports.jsx("span", {
-          children: "Model profile"
-        }), jsxRuntimeExports.jsx("strong", {
-          children: operator.modelProfile || '-'
-        })]
-      })]
-    }), jsxRuntimeExports.jsx("div", {
-      className: "stage-rail",
-      children: operator.stageTrail.map(item => jsxRuntimeExports.jsx("div", {
-        className: `stage-chip ${item.active ? 'active' : item.done ? 'done' : 'pending'}`.trim(),
-        children: jsxRuntimeExports.jsx("span", {
-          children: item.label
-        })
-      }, item.key))
-    }), jsxRuntimeExports.jsx(MetricGrid, {
-      items: compact ? counters.slice(0, 5) : counters,
-      className: "process-metrics"
-    }), operator.warningNotice ? jsxRuntimeExports.jsx(InlineNotice, {
-      message: operator.warningNotice,
-      tone: "danger"
-    }) : null, operator.latestError ? jsxRuntimeExports.jsx(InlineNotice, {
-      message: operator.latestError,
-      tone: "danger"
-    }) : null, draftBatchSize ? jsxRuntimeExports.jsx(InlineNotice, {
-      message: `Draft batch: ${draftBatchNote}`,
-      tone: toneFor(draftBatch.status || draftBatch.handoff_status)
-    }) : null, operator.temporaryChatStatus && operator.temporaryChatStatus !== '-' ? jsxRuntimeExports.jsx(InlineNotice, {
-      message: `ChatGPT temp chat: ${operator.temporaryChatStatus}${operator.temporaryChatCheckedAt ? ` (${operator.temporaryChatCheckedAt})` : ''}.`,
-      tone: operator.temporaryChatStatus === 'enabled' ? 'success' : 'warning'
-    }) : null, operator.latestEventMeta.length ? jsxRuntimeExports.jsx("div", {
-      className: "event-chips",
-      children: operator.latestEventMeta.map(chip => jsxRuntimeExports.jsxs(Badge, {
-        tone: "neutral",
-        children: [chip.label, ": ", chip.value]
-      }, `${chip.label}-${chip.value}`))
-    }) : null]
+          children: event.message
+        }), jsxRuntimeExports.jsx("div", {
+          className: "activity-subtle",
+          children: compactList([event.company, event.role, event.source], 3) || 'System'
+        }), event.trace_ref ? jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Trace Summary: ", event.trace_ref]
+        }) : null, event.error?.message ? jsxRuntimeExports.jsx("div", {
+          className: "detail-line",
+          children: event.error.message
+        }) : null, chips.length ? jsxRuntimeExports.jsx("div", {
+          className: "event-chips",
+          children: chips.map(chip => jsxRuntimeExports.jsxs(Badge, {
+            tone: "neutral",
+            children: [chip.label, ": ", chip.value]
+          }, `${event.event_id}-${chip.label}`))
+        }) : null]
+      }, event.event_id);
+    })
   });
 }
 function LiveTimelineSection({
@@ -38660,9 +38546,9 @@ function JobsTable({
             children: "Blockers"
           }), jsxRuntimeExports.jsx("th", {
             children: "Updated"
-          }), jsxRuntimeExports.jsx("th", {
+          }), onApply ? jsxRuntimeExports.jsx("th", {
             children: "Action"
-          })]
+          }) : null]
         })
       }), jsxRuntimeExports.jsx("tbody", {
         children: rows.map(row => {
@@ -38707,8 +38593,8 @@ function JobsTable({
               })
             }), jsxRuntimeExports.jsx("td", {
               children: formatDate(updatedAt)
-            }), jsxRuntimeExports.jsx("td", {
-              children: onApply && row.application_id ? jsxRuntimeExports.jsx("button", {
+            }), onApply ? jsxRuntimeExports.jsx("td", {
+              children: row.application_id ? jsxRuntimeExports.jsx("button", {
                 className: "button button-ghost",
                 type: "button",
                 onClick: () => onApply(row),
@@ -38717,7 +38603,7 @@ function JobsTable({
                 className: "cell-meta",
                 children: "-"
               })
-            })]
+            }) : null]
           }, `${row.job_id}-${row.application_id || 'job'}`);
         })
       })]
@@ -38797,232 +38683,134 @@ function SourceHealthPanel({
     }) : null]
   });
 }
-function DashboardPage({
+function RunStatusSummaryCard({
   operator,
-  live
+  title = 'Run Status',
+  description,
+  actions
 }) {
-  const dashboard = usePolledJson('/api/dashboard', 7000);
-  const counts = dashboard.data?.snapshot?.counts || {};
-  const auto = dashboard.data?.autonomous || {};
-  const jobsTable = dashboard.data?.jobs_table?.items || [];
-  const [notice, setNotice] = reactExports.useState('');
-  const [resetting, setResetting] = reactExports.useState(false);
-  async function startDiscover() {
-    await requestJson('/api/discover', {
-      method: 'POST'
-    });
-    await Promise.allSettled([live.refresh(), dashboard.refresh()]);
-  }
-  async function startAutonomous() {
-    await requestJson('/api/autonomous/run', {
-      method: 'POST'
-    });
-    await Promise.allSettled([live.refresh(), dashboard.refresh()]);
-  }
-  async function applyNow(row) {
-    if (!row?.application_id) return;
-    await requestJson('/api/review/action', {
-      method: 'POST',
-      body: JSON.stringify({
-        application_id: row.application_id,
-        action: 'approve'
-      })
-    });
-    await Promise.allSettled([dashboard.refresh(), live.refresh()]);
-  }
-  async function resetOperationalData() {
-    setResetting(true);
-    try {
-      const result = await requestJson('/api/workspace/reset-operational', {
-        method: 'POST'
-      });
-      const deleted = result?.deleted || {};
-      setNotice(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.jobs || 0} job files, ${deleted.runs || 0} runs.`);
-      await Promise.allSettled([dashboard.refresh(), live.refresh()]);
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    } finally {
-      setResetting(false);
-    }
-  }
+  const runLabel = operator.isRunning ? operator.runType : 'idle';
+  const stageLabel = STAGE_LABELS[operator.stage] || operator.stage || 'Idle';
   const summaryCards = [{
-    label: 'Inbox',
-    value: formatNumber(counts.inbox ?? 0),
-    note: 'jobs in workspace'
+    label: 'Run',
+    value: runLabel,
+    note: operator.latestMessage || 'No active run.'
   }, {
-    label: 'Applications',
-    value: formatNumber(operator.counters.evaluated || counts.applications || 0),
-    note: 'tracked application records'
+    label: 'Stage',
+    value: stageLabel,
+    note: operator.currentTitle || 'No active target'
   }, {
-    label: 'Queue Depth',
-    value: formatNumber(auto.queue_depth ?? operator.queue.depth),
-    note: 'active submission records'
-  }, {
-    label: 'Blocked',
-    value: formatNumber(operator.counters.blockedByQuestions || auto.blocked_by_questions || auto.blocked_applications || operator.queue.blocked),
-    note: 'manual answers needed'
-  }, {
-    label: 'Ready',
-    value: formatNumber(operator.counters.readyToApply || auto.ready_to_apply || auto.ready_for_submit || 0),
-    note: `${formatNumber(auto.ready_to_apply_threshold || 5)} threshold`
-  }, {
-    label: 'Prompts',
-    value: formatNumber(auto.unresolved_prompts ?? operator.queue.pendingQuestions),
-    note: 'manual questions waiting'
-  }];
-  const discoveryCards = [{
-    label: 'Discovered',
-    value: formatNumber(operator.counters.discovered),
-    note: 'jobs retained in workspace'
-  }, {
-    label: 'Screened Out',
-    value: formatNumber(operator.counters.screenedOut),
-    note: 'rejected during screening'
-  }, {
-    label: 'Evaluated',
-    value: formatNumber(operator.counters.evaluated),
-    note: 'records created from evaluation'
-  }, {
-    label: 'Drafted',
-    value: formatNumber(operator.counters.drafted),
-    note: 'artifacts generated'
-  }, {
-    label: 'Ready To Apply',
-    value: formatNumber(operator.counters.readyToApply),
-    note: 'actual apply queue'
+    label: 'Queue',
+    value: formatNumber(operator.queue.depth),
+    note: `${formatNumber(operator.queue.blocked)} blocked / ${formatNumber(operator.queue.pendingQuestions)} prompts`
   }, {
     label: 'Submitted',
     value: formatNumber(operator.counters.submitted),
-    note: 'successful submissions'
+    note: `${formatNumber(operator.counters.failed)} failed`
   }, {
-    label: 'Blocked By Questions',
-    value: formatNumber(operator.counters.blockedByQuestions),
-    note: 'waiting on operator answers'
+    label: 'Elapsed',
+    value: operator.elapsed,
+    note: `Last update ${operator.lastSeen}`
   }, {
-    label: 'Board Progress',
-    value: operator.counters.discoveryBoardsTotal ? `${formatNumber(operator.counters.discoveryBoardsCompleted)} / ${formatNumber(operator.counters.discoveryBoardsTotal)}` : '-',
-    note: `${formatNumber(operator.counters.discoverySeedPages)} seed pages crawled`
-  }, {
-    label: 'Hard Rejected',
-    value: formatNumber(operator.counters.deterministicRejects),
-    note: 'title or hard filters'
-  }, {
-    label: 'Failed',
-    value: formatNumber(operator.counters.failed),
-    note: 'terminal application failures'
+    label: 'Stream',
+    value: operator.streamHealth,
+    note: operator.modelBadge || operator.modelProfile || '-'
   }];
-  return jsxRuntimeExports.jsxs("div", {
-    className: "page-stack",
-    children: [jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Operator Console",
-      title: "Find My Job Console",
-      description: "Discovery, screening, drafting, review, and submit state now follows the backend run state instead of stale browser state.",
-      actions: jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, {
-        children: [jsxRuntimeExports.jsx("button", {
-          className: "button button-primary",
-          type: "button",
-          onClick: startDiscover,
-          disabled: operator.isRunning,
-          children: operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'
-        }), jsxRuntimeExports.jsx("button", {
-          className: "button button-primary",
-          type: "button",
-          onClick: startAutonomous,
-          disabled: operator.isRunning,
-          children: operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'
-        }), jsxRuntimeExports.jsx("button", {
-          className: "button button-ghost",
-          type: "button",
-          onClick: resetOperationalData,
-          disabled: resetting,
-          children: resetting ? 'Resetting' : 'Reset Operational Data'
+  return jsxRuntimeExports.jsxs("article", {
+    className: "panel run-status-card",
+    children: [jsxRuntimeExports.jsxs("div", {
+      className: "run-status-head",
+      children: [jsxRuntimeExports.jsxs("div", {
+        children: [jsxRuntimeExports.jsx("div", {
+          className: "eyebrow",
+          children: "Run Status"
+        }), jsxRuntimeExports.jsx("h3", {
+          children: title
+        }), jsxRuntimeExports.jsx("p", {
+          className: "section-copy",
+          children: description || operator.latestMessage || 'No active run is in progress right now.'
         })]
-      }),
-      children: jsxRuntimeExports.jsxs("div", {
-        className: "section-stack",
-        children: [jsxRuntimeExports.jsx(CurrentProcessPanel, {
-          operator: operator
-        }), jsxRuntimeExports.jsx(InlineNotice, {
-          message: notice,
-          tone: toneFor(notice)
-        }), jsxRuntimeExports.jsx(MetricGrid, {
-          items: summaryCards
-        }), jsxRuntimeExports.jsx(Section, {
-          eyebrow: "Scoreboard",
-          title: "Discovery Scoreboard",
-          description: "Per-run counters from the live state.",
-          className: "subsection-panel",
-          children: jsxRuntimeExports.jsx(MetricGrid, {
-            items: discoveryCards
-          })
-        }), jsxRuntimeExports.jsx(SourceHealthPanel, {
-          operator: operator
-        })]
-      })
-    }), jsxRuntimeExports.jsx(LiveTimelineSection, {
-      operator: operator,
-      live: live,
-      eyebrow: "Live Feed",
-      title: "Run Timeline",
-      description: "Structured live events from discovery through submission, with redacted trace summaries for model calls and pipeline steps."
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Operator Queue",
-      title: "Jobs And Application State",
-      description: "Priority queue view showing current stage, blockers, and next action.",
-      children: jsxRuntimeExports.jsx(DataState, {
-        error: dashboard.error,
-        loading: dashboard.loading,
-        empty: !jobsTable.length,
-        emptyLabel: "No queue rows yet.",
-        emptyDetail: "Discovery will populate jobs here and the apply pipeline will add submission state.",
-        children: jsxRuntimeExports.jsx(JobsTable, {
-          rows: jobsTable.slice(0, 20),
-          onApply: applyNow
-        })
-      })
-    })]
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "run-status-actions",
+        children: [jsxRuntimeExports.jsx(Badge, {
+          tone: toneForStream(operator.streamHealth),
+          children: operator.streamHealth
+        }), jsxRuntimeExports.jsx(Badge, {
+          tone: toneFor(operator.status),
+          children: operator.status
+        }), actions ? jsxRuntimeExports.jsx("div", {
+          className: "action-row",
+          children: actions
+        }) : null]
+      })]
+    }), jsxRuntimeExports.jsx(MetricGrid, {
+      items: summaryCards,
+      className: "run-status-metrics"
+    }), operator.warningNotice ? jsxRuntimeExports.jsx(InlineNotice, {
+      message: operator.warningNotice,
+      tone: "danger"
+    }) : null, operator.latestError ? jsxRuntimeExports.jsx(InlineNotice, {
+      message: operator.latestError,
+      tone: "danger"
+    }) : null]
   });
 }
-function SetupPage() {
-  const readiness = usePolledJson('/api/setup/readiness', 8000);
-  const [message, setMessage] = reactExports.useState('');
-  const [resetting, setResetting] = reactExports.useState(false);
+function RunsHistoryList({
+  runItems
+}) {
+  return jsxRuntimeExports.jsx("div", {
+    className: "runs-list",
+    children: runItems.map(run => jsxRuntimeExports.jsxs("article", {
+      className: "finding-card",
+      children: [jsxRuntimeExports.jsxs("div", {
+        className: "activity-meta",
+        children: [jsxRuntimeExports.jsx(Badge, {
+          tone: toneFor(run.status),
+          children: run.status
+        }), jsxRuntimeExports.jsx("span", {
+          children: run.run_type
+        }), jsxRuntimeExports.jsx("span", {
+          children: formatDate(run.completed_at || run.started_at)
+        })]
+      }), jsxRuntimeExports.jsx("strong", {
+        children: run.run_id
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "detail-line",
+        children: ["submitted ", (run.submitted_count ?? run.submitted_application_ids?.length) || 0, " / failed ", (run.failed_count ?? run.failed_application_ids?.length) || 0]
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "detail-line",
+        children: ["processed ", (run.processed_count ?? run.processed_job_ids?.length) || 0, " / evaluated ", (run.evaluated_count ?? run.evaluated_application_ids?.length) || 0]
+      })]
+    }, run.run_id))
+  });
+}
+function ReadinessPanel({
+  readiness,
+  message,
+  resetting,
+  onReset
+}) {
   const findings = readiness.data?.findings || [];
   const profileSurface = readiness.data?.profile_surface || {};
   const profileMode = profileSurface.mode === 'local_user_profile' ? 'Configured Local Profile' : profileSurface.mode === 'advanced_local_overrides' ? 'Advanced Local Overrides' : 'Sample Mode';
   const activeAdvancedPaths = Array.isArray(profileSurface.active_advanced_paths) ? profileSurface.active_advanced_paths.filter(Boolean) : [];
-  async function resetOperationalData() {
-    setResetting(true);
-    try {
-      const result = await requestJson('/api/workspace/reset-operational', {
-        method: 'POST'
-      });
-      const deleted = result?.deleted || {};
-      setMessage(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.submissions || 0} submissions, ${deleted.runs || 0} runs.`);
-      await readiness.refresh();
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : String(err));
-    } finally {
-      setResetting(false);
-    }
-  }
-  return jsxRuntimeExports.jsx("div", {
-    className: "page-stack",
-    children: jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Readiness",
-      title: "Workspace And Launch Checks",
-      description: "Config validation, model doctor, and launch checks from the backend release pipeline.",
-      actions: jsxRuntimeExports.jsx("button", {
-        className: "button button-ghost",
-        type: "button",
-        onClick: resetOperationalData,
-        disabled: resetting,
-        children: resetting ? 'Resetting...' : 'Reset Operational Data'
-      }),
-      children: jsxRuntimeExports.jsxs(DataState, {
-        error: readiness.error,
-        loading: readiness.loading,
-        empty: !readiness.data,
+  return jsxRuntimeExports.jsx(Section, {
+    eyebrow: "Readiness",
+    title: "Workspace Readiness",
+    description: "Launch checks, profile surface status, and the release gates that determine whether the workspace is ready for real applications.",
+    actions: jsxRuntimeExports.jsx("button", {
+      className: "button button-ghost",
+      type: "button",
+      onClick: onReset,
+      disabled: resetting,
+      children: resetting ? 'Resetting...' : 'Reset Operational Data'
+    }),
+    children: jsxRuntimeExports.jsx(DataState, {
+      error: readiness.error,
+      loading: readiness.loading,
+      empty: !readiness.data,
+      children: jsxRuntimeExports.jsxs("div", {
+        className: "section-stack",
         children: [jsxRuntimeExports.jsx(MetricGrid, {
           items: [{
             label: 'Overall',
@@ -39035,11 +38823,11 @@ function SetupPage() {
           }, {
             label: 'Doctor',
             value: readiness.data?.doctor?.overall_status || '-',
-            note: 'model and runtime'
+            note: 'runtime and browser readiness'
           }, {
             label: 'Launch',
             value: readiness.data?.launch_check?.overall_status || '-',
-            note: 'production launch gate'
+            note: 'final release gate'
           }, {
             label: 'Sources',
             value: formatNumber(Object.keys(readiness.data?.sources || {}).length),
@@ -39047,56 +38835,171 @@ function SetupPage() {
           }, {
             label: 'Submit',
             value: readiness.data?.automation?.submit_enabled ? 'on' : 'off',
-            note: 'submit toggle'
+            note: 'submission toggle'
           }, {
             label: 'Profile Mode',
             value: profileMode,
-            note: profileSurface.configured ? 'local-only candidate data is active' : 'still using tracked sample data'
+            note: profileSurface.configured ? 'local-only candidate data is active' : 'tracked sample data is still active'
           }]
         }), jsxRuntimeExports.jsxs("div", {
-          className: "panel",
-          style: {
-            marginTop: '1rem'
-          },
+          className: "subpanel settings-card",
           children: [jsxRuntimeExports.jsx("div", {
             className: "eyebrow",
             children: "Local Profile Surface"
-          }), jsxRuntimeExports.jsx("h3", {
+          }), jsxRuntimeExports.jsx("strong", {
             children: profileMode
           }), jsxRuntimeExports.jsx("p", {
             className: "section-copy",
-            children: profileSurface.configured ? 'The repo is reading local-only candidate data from ignored override paths.' : 'The repo is still using tracked sample candidate data. Create a local-only profile before real runs.'
-          }), jsxRuntimeExports.jsxs("p", {
-            children: [jsxRuntimeExports.jsx("strong", {
-              children: "Local profile file:"
-            }), " ", jsxRuntimeExports.jsx("code", {
-              children: profileSurface.local_path || '.fmj/local-overrides/filefirst/user-profile.yml'
-            })]
-          }), jsxRuntimeExports.jsxs("p", {
-            children: [jsxRuntimeExports.jsx("strong", {
-              children: "Local template:"
-            }), " ", jsxRuntimeExports.jsx("code", {
-              children: profileSurface.local_template_path || '.fmj/local-overrides/filefirst/user-profile.template.yml'
-            })]
-          }), jsxRuntimeExports.jsxs("p", {
-            children: [jsxRuntimeExports.jsx("strong", {
-              children: "Tracked example:"
-            }), " ", jsxRuntimeExports.jsx("code", {
-              children: profileSurface.public_template_path || 'templates/user-profile.local.example.yml'
-            })]
-          }), activeAdvancedPaths.length ? jsxRuntimeExports.jsxs("p", {
-            children: [jsxRuntimeExports.jsx("strong", {
-              children: "Active advanced overrides:"
-            }), " ", activeAdvancedPaths.join(', ')]
-          }) : null]
+            children: profileSurface.configured ? 'The app is reading local-only candidate data from ignored override paths.' : 'The app is still reading tracked sample candidate data. Switch to local-only profile files before real runs.'
+          }), jsxRuntimeExports.jsxs("div", {
+            className: "detail-stack",
+            children: [jsxRuntimeExports.jsxs("div", {
+              className: "detail-line",
+              children: [jsxRuntimeExports.jsx("strong", {
+                children: "Local profile file:"
+              }), " ", jsxRuntimeExports.jsx("code", {
+                children: profileSurface.local_path || '.fmj/local-overrides/filefirst/user-profile.yml'
+              })]
+            }), jsxRuntimeExports.jsxs("div", {
+              className: "detail-line",
+              children: [jsxRuntimeExports.jsx("strong", {
+                children: "Local template:"
+              }), " ", jsxRuntimeExports.jsx("code", {
+                children: profileSurface.local_template_path || '.fmj/local-overrides/filefirst/user-profile.template.yml'
+              })]
+            }), jsxRuntimeExports.jsxs("div", {
+              className: "detail-line",
+              children: [jsxRuntimeExports.jsx("strong", {
+                children: "Tracked example:"
+              }), " ", jsxRuntimeExports.jsx("code", {
+                children: profileSurface.public_template_path || 'templates/user-profile.local.example.yml'
+              })]
+            }), activeAdvancedPaths.length ? jsxRuntimeExports.jsxs("div", {
+              className: "detail-line",
+              children: [jsxRuntimeExports.jsx("strong", {
+                children: "Active advanced overrides:"
+              }), " ", activeAdvancedPaths.join(', ')]
+            }) : null]
+          })]
         }), jsxRuntimeExports.jsx(InlineNotice, {
           message: message,
           tone: toneFor(message)
-        }), jsxRuntimeExports.jsx(FindingsList, {
+        }), findings.length ? jsxRuntimeExports.jsx(FindingsList, {
           items: findings
-        })]
+        }) : null]
       })
     })
+  });
+}
+function DashboardPage({
+  operator,
+  live
+}) {
+  const dashboard = usePolledJson('/api/dashboard', 7000);
+  const runs = usePolledJson('/api/runs/history', 9000);
+  const counts = dashboard.data?.snapshot?.counts || {};
+  const auto = dashboard.data?.autonomous || {};
+  const recentRuns = runs.data?.items || [];
+  const needsInputCount = operator.counters.blockedByQuestions || auto.blocked_by_questions || auto.blocked_applications || operator.queue.blocked;
+  const [runHistoryOpen, setRunHistoryOpen] = reactExports.useState(false);
+  const summaryCards = [{
+    label: 'Inbox',
+    value: formatNumber(counts.inbox ?? 0),
+    note: 'jobs in workspace'
+  }, {
+    label: 'Needs Input',
+    value: formatNumber(needsInputCount),
+    note: 'manual answers still needed'
+  }, {
+    label: 'Ready',
+    value: formatNumber(operator.counters.readyToApply || auto.ready_to_apply || auto.ready_for_submit || 0),
+    note: `${formatNumber(auto.ready_to_apply_threshold || 5)} threshold`
+  }, {
+    label: 'Submitted',
+    value: formatNumber(operator.counters.submitted),
+    note: 'successful submissions'
+  }];
+  reactExports.useEffect(() => {
+    if (recentRuns.length > 0) {
+      const mostRecent = recentRuns[0];
+      const completedAt = mostRecent?.completed_at || mostRecent?.started_at;
+      if (completedAt) {
+        const hoursAgo = (Date.now() - new Date(completedAt).getTime()) / (1000 * 60 * 60);
+        if (hoursAgo < 24) setRunHistoryOpen(true);
+      }
+    }
+  }, [recentRuns.length]);
+  return jsxRuntimeExports.jsxs("div", {
+    className: "page-stack",
+    children: [jsxRuntimeExports.jsx(Section, {
+      eyebrow: "Dashboard",
+      title: "Overview And Health",
+      description: "Pipeline health, queue pressure, and discovery coverage at a glance.",
+      children: jsxRuntimeExports.jsx(DataState, {
+        error: dashboard.error,
+        loading: dashboard.loading,
+        empty: !dashboard.data,
+        children: jsxRuntimeExports.jsxs("div", {
+          className: "section-stack",
+          children: [jsxRuntimeExports.jsx(RunStatusSummaryCard, {
+            actions: jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, {
+              children: [jsxRuntimeExports.jsx(Link, {
+                className: "button button-primary",
+                to: "/autopilot",
+                children: "Open Autopilot"
+              }), jsxRuntimeExports.jsx(Link, {
+                className: "button button-ghost",
+                to: "/review",
+                children: needsInputCount > 0 ? `Review (${formatNumber(needsInputCount)} need input)` : 'Open Review'
+              })]
+            }),
+            description: "Use Autopilot to run the pipeline. Use Review only when an application needs your attention.",
+            operator: operator,
+            title: operator.isRunning ? `${String(operator.runType || 'run').replace(/_/g, ' ')} in progress` : 'No Active Run'
+          }), jsxRuntimeExports.jsx(MetricGrid, {
+            items: summaryCards
+          })]
+        })
+      })
+    }), jsxRuntimeExports.jsx(SourceHealthPanel, {
+      operator: operator
+    }), jsxRuntimeExports.jsx(Section, {
+      eyebrow: "Recent Activity",
+      title: "Activity & Run History",
+      description: "Pipeline events and completed runs. Open Autopilot for the full execution timeline and trace tools.",
+      actions: jsxRuntimeExports.jsx(Link, {
+        className: "button button-ghost",
+        to: "/autopilot",
+        children: "Open Full Timeline"
+      }),
+      children: jsxRuntimeExports.jsx(DataState, {
+        error: live.error,
+        loading: !operator.events.length && connectionLoading(operator),
+        empty: !operator.events.length && !recentRuns.length,
+        emptyLabel: "No activity yet.",
+        emptyDetail: "Start discovery or open Autopilot to run the pipeline.",
+        children: jsxRuntimeExports.jsxs("div", {
+          className: "section-stack",
+          children: [operator.events.length ? jsxRuntimeExports.jsx(ActivityFeed, {
+            events: operator.eventsDescending.slice(0, 4)
+          }) : null, jsxRuntimeExports.jsx(ConsoleDisclosure, {
+            open: runHistoryOpen,
+            onToggle: () => setRunHistoryOpen(c => !c),
+            summary: `${formatNumber(recentRuns.length)} recent run(s) recorded.`,
+            title: "Run History",
+            children: jsxRuntimeExports.jsx(DataState, {
+              error: runs.error,
+              loading: runs.loading,
+              empty: !recentRuns.length,
+              emptyLabel: "No runs recorded yet.",
+              children: jsxRuntimeExports.jsx(RunsHistoryList, {
+                runItems: recentRuns.slice(0, 5)
+              })
+            })
+          })]
+        })
+      })
+    })]
   });
 }
 const ROUTING_FAMILIES = [{
@@ -39615,7 +39518,9 @@ function ModelHotSwap({
 }
 function SettingsPage() {
   const settings = usePolledJson('/api/settings', 8000);
+  const readiness = usePolledJson('/api/setup/readiness', 8000);
   const [message, setMessage] = reactExports.useState('');
+  const [readinessMessage, setReadinessMessage] = reactExports.useState('');
   const [savingState, setSavingState] = reactExports.useState({});
   const [dirtyState, setDirtyState] = reactExports.useState({
     autonomous: false,
@@ -39651,6 +39556,25 @@ function SettingsPage() {
     command_text: '',
     working_dir: ''
   }));
+  const [resetting, setResetting] = reactExports.useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openSection = searchParams.get('section') || '';
+  function toggleSection(key) {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (next.get('section') === key) {
+        next.delete('section');
+      } else {
+        next.set('section', key);
+      }
+      return next;
+    }, {
+      replace: true
+    });
+  }
+  function isSectionOpen(key) {
+    return openSection === key;
+  }
   function markDirty(key) {
     setDirtyState(prev => ({
       ...prev,
@@ -39692,10 +39616,15 @@ function SettingsPage() {
       setRuntimeModelForm(applyProviderDefaults(settings.data.runtime_model || settings.data.local_model));
     }
   }, [dirtyState.autonomous, dirtyState.chatgpt, dirtyState.portals, dirtyState.runtime, settings.data]);
+  reactExports.useEffect(() => {
+    if (!openSection && readiness.data?.overall_status && readiness.data.overall_status !== 'pass') {
+      toggleSection('readiness');
+    }
+  }, [readiness.data?.overall_status]);
   const advancedProfiles = settings.data?.advanced_models?.profiles || [];
   const runtimeChecks = settings.data?.last_model_checks || {};
   const modelStrategy = settings.data?.model_strategy || {};
-  const readinessFindings = settings.data?.readiness?.findings || [];
+  settings.data?.readiness?.findings || [];
   async function withSaving(key, fn) {
     setSavingState(prev => ({
       ...prev,
@@ -39935,68 +39864,76 @@ function SettingsPage() {
       setMessage(err instanceof Error ? err.message : String(err));
     }
   }
+  async function resetOperationalData() {
+    setResetting(true);
+    try {
+      const result = await requestJson('/api/workspace/reset-operational', {
+        method: 'POST'
+      });
+      const deleted = result?.deleted || {};
+      setReadinessMessage(`Reset complete. Cleared ${deleted.applications || 0} applications, ${deleted.submissions || 0} submissions, ${deleted.runs || 0} runs.`);
+      await Promise.allSettled([readiness.refresh(), settings.refresh()]);
+    } catch (err) {
+      setReadinessMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResetting(false);
+    }
+  }
   return jsxRuntimeExports.jsxs("div", {
     className: "page-stack",
     children: [jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Launch Readiness",
-      title: "Control Center",
-      description: "One control plane for launch scope, runtime models, routing families, and health checks.",
-      children: jsxRuntimeExports.jsxs(DataState, {
+      eyebrow: "Settings",
+      title: "Configuration",
+      description: "Expand any section to configure. Sections auto-open when they need attention.",
+      children: jsxRuntimeExports.jsx(DataState, {
         error: settings.error,
         loading: settings.loading,
         empty: !settings.data,
-        children: [jsxRuntimeExports.jsx(InlineNotice, {
-          message: message,
-          tone: toneFor(message)
-        }), Object.values(dirtyState).some(Boolean) ? jsxRuntimeExports.jsx(InlineNotice, {
-          message: "Unsaved local edits are preserved in the browser until you save them.",
-          tone: "warning"
-        }) : null, jsxRuntimeExports.jsx(MetricGrid, {
-          items: [{
-            label: 'Runtime Mode',
-            value: modelStrategy.mode || 'lm_studio_local',
-            note: modelStrategy.launch_transport_mix || 'LM Studio local routing'
-          }, {
-            label: 'Draft Renderer',
-            value: settings.data?.drafting_strategy?.renderer || settings.data?.chatgpt_drafting?.renderer || '-',
-            note: settings.data?.chatgpt_drafting?.enabled ? 'ChatGPT-managed PDF drafting' : 'renderer not configured'
-          }, {
-            label: 'Runtime Default',
-            value: modelStrategy.model || runtimeModelForm?.model || '-',
-            note: modelStrategy.base_url || runtimeModelForm?.base_url || '-'
-          }, {
-            label: 'Transport',
-            value: modelStrategy.transport || runtimeModelForm?.transport || '-',
-            note: providerLabel(modelStrategy.provider || runtimeModelForm?.provider)
-          }, {
-            label: 'API Key',
-            value: 'not required',
-            note: 'LM Studio runs over local HTTP without API-key routing.'
-          }, {
-            label: 'Profiles',
-            value: formatNumber(advancedProfiles.length),
-            note: 'active router profiles'
-          }, {
-            label: 'Config',
-            value: settings.data?.readiness?.config_validation?.overall_status || '-',
-            note: 'workspace validation'
-          }, {
-            label: 'Doctor',
-            value: settings.data?.readiness?.doctor?.overall_status || '-',
-            note: 'runtime + browser readiness'
-          }, {
-            label: 'Launch',
-            value: settings.data?.readiness?.launch_check?.overall_status || '-',
-            note: 'final release gate'
-          }]
-        }), jsxRuntimeExports.jsx(FindingsList, {
-          items: readinessFindings.slice(0, 16)
-        })]
+        children: jsxRuntimeExports.jsxs("div", {
+          className: "section-stack",
+          children: [jsxRuntimeExports.jsx(InlineNotice, {
+            message: message,
+            tone: toneFor(message)
+          }), Object.values(dirtyState).some(Boolean) ? jsxRuntimeExports.jsx(InlineNotice, {
+            message: "Unsaved local edits stay in the browser until you save them.",
+            tone: "warning"
+          }) : null, jsxRuntimeExports.jsx(MetricGrid, {
+            items: [{
+              label: 'Launch',
+              value: settings.data?.readiness?.launch_check?.overall_status || '-',
+              note: 'final release gate'
+            }, {
+              label: 'Draft Renderer',
+              value: settings.data?.drafting_strategy?.renderer || settings.data?.chatgpt_drafting?.renderer || '-',
+              note: settings.data?.chatgpt_drafting?.enabled ? 'ChatGPT-managed' : 'not configured'
+            }, {
+              label: 'Runtime',
+              value: modelStrategy.model || runtimeModelForm?.model || '-',
+              note: providerLabel(modelStrategy.provider || runtimeModelForm?.provider)
+            }, {
+              label: 'Profiles',
+              value: formatNumber(advancedProfiles.length),
+              note: 'active router profiles'
+            }]
+          })]
+        })
       })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Drafting",
+    }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+      open: isSectionOpen('readiness'),
+      onToggle: () => toggleSection('readiness'),
+      summary: `Overall: ${readiness.data?.overall_status || 'loading'} · Config: ${readiness.data?.config_validation?.overall_status || '-'} · Doctor: ${readiness.data?.doctor?.overall_status || '-'} · Launch: ${readiness.data?.launch_check?.overall_status || '-'}`,
+      title: "Readiness & Workspace Health",
+      children: jsxRuntimeExports.jsx(ReadinessPanel, {
+        message: readinessMessage,
+        onReset: resetOperationalData,
+        readiness: readiness,
+        resetting: resetting
+      })
+    }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+      open: isSectionOpen('chatgpt'),
+      onToggle: () => toggleSection('chatgpt'),
+      summary: `${settings.data?.chatgpt_drafting?.enabled ? 'Enabled' : 'Disabled'} · ${chatgptForm?.browser_mode || 'attached'} · ${String(chatgptForm?.max_parallel_jobs || 1)} parallel · Last: ${settings.data?.chatgpt_drafting?.last_result?.success ? 'success' : settings.data?.chatgpt_drafting?.last_error ? 'failed' : 'idle'}`,
       title: "ChatGPT Drafting",
-      description: "Live resume and cover-letter generation now uses the managed ChatGPT profile. LM Studio stays in scope for screening and application-question answering.",
       children: jsxRuntimeExports.jsx(DataState, {
         error: settings.error,
         loading: settings.loading,
@@ -40021,7 +39958,7 @@ function SettingsPage() {
             }, {
               label: 'Temporary Chat',
               value: chatgptForm?.use_temporary_chat ? 'enabled' : 'disabled',
-              note: 'disable when ChatGPT attachment downloads are more reliable without it'
+              note: 'disable when downloads are more reliable without it'
             }, {
               label: 'Launch',
               value: settings.data?.chatgpt_drafting?.launch_status?.last_browser_launch_ok ? 'ok' : 'pending',
@@ -40195,7 +40132,7 @@ function SettingsPage() {
             })]
           }), jsxRuntimeExports.jsx("div", {
             className: "detail-line",
-            children: "This browser session is separate from ATS submit automation. Downloads are captured into the workspace runtime folder and then normalized into the existing submission artifact names."
+            children: "This browser session is separate from ATS submit automation. Downloads land in the runtime folder and are then normalized into the usual submission artifact names."
           }), jsxRuntimeExports.jsxs("div", {
             className: "form-actions",
             children: [jsxRuntimeExports.jsx("button", {
@@ -40219,10 +40156,11 @@ function SettingsPage() {
           })]
         })
       })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Sources",
-      title: "Sources & Automation",
-      description: "Manage enabled discovery sources, additive board seeds, and tracked companies without losing unsaved edits to background refreshes.",
+    }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+      open: isSectionOpen('sources'),
+      onToggle: () => toggleSection('sources'),
+      summary: PORTAL_SOURCE_OPTIONS.map(s => `${s.label}: ${portalForm?.sources?.[s.id]?.enabled ? 'on' : 'off'}`).join(' · ') + ` · ${(portalForm?.tracked_companies || []).length} tracked companies`,
+      title: "Sources & Discovery",
       children: jsxRuntimeExports.jsx(DataState, {
         error: settings.error,
         loading: settings.loading,
@@ -40331,7 +40269,7 @@ function SettingsPage() {
               children: "Tracked Companies"
             }), jsxRuntimeExports.jsx("div", {
               className: "detail-line",
-              children: "Optional company-specific biasing inputs. These add priority seeds for discovery, but they no longer cap the broader built-in board universe."
+              children: "Optional company-specific inputs. These add priority seeds for discovery without narrowing the broader board universe."
             }), jsxRuntimeExports.jsx("div", {
               className: "tracked-company-list",
               children: (portalForm?.tracked_companies || []).map((company, index) => jsxRuntimeExports.jsxs("div", {
@@ -40456,10 +40394,11 @@ function SettingsPage() {
           })]
         })
       })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Routing",
-      title: "Model Routing",
-      description: "Set the LM Studio runtime for screening and application-question answering. Role-level overrides stay available below, and legacy writer bindings remain optional rollback paths.",
+    }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+      open: isSectionOpen('automation'),
+      onToggle: () => toggleSection('automation'),
+      summary: `Pipeline: ${autonomousForm?.enabled ? 'on' : 'off'} · Submit: ${autonomousForm?.submit_enabled ? 'on' : 'off'} · Model: ${runtimeModelForm?.model || '-'} · ${providerLabel(runtimeModelForm?.provider)}`,
+      title: "Automation & Runtime",
       children: jsxRuntimeExports.jsx(DataState, {
         error: settings.error,
         loading: settings.loading,
@@ -40470,7 +40409,7 @@ function SettingsPage() {
             className: "subpanel settings-card",
             children: [jsxRuntimeExports.jsx("div", {
               className: "eyebrow",
-              children: "Automation Controls"
+              children: "Automation Defaults"
             }), jsxRuntimeExports.jsxs("form", {
               className: "form-grid",
               onSubmit: saveAutonomous,
@@ -40626,7 +40565,7 @@ function SettingsPage() {
                 })]
               }), jsxRuntimeExports.jsx("div", {
                 className: "detail-line span-all",
-                children: "Autonomous runs stop for the day once recorded submissions reach the daily max. Discovery and queue-building continue normally until that cap is hit."
+                children: "Autonomous submission stops for the day once recorded submissions reach the daily max. Discovery and queue-building continue until that cap is hit."
               }), jsxRuntimeExports.jsxs("label", {
                 className: "checkbox-field",
                 children: [jsxRuntimeExports.jsx("input", {
@@ -40764,7 +40703,7 @@ function SettingsPage() {
                 })]
               }), jsxRuntimeExports.jsx("div", {
                 className: "detail-line span-all",
-                children: "Launch uses LM Studio-local only. Enter the loaded LM Studio model id and the local server base URL."
+                children: "Launch uses LM Studio-local only. Enter the loaded model id and the local server base URL."
               }), jsxRuntimeExports.jsx("div", {
                 className: "detail-line span-all",
                 children: runtimeCatalog.note || `${formatNumber(runtimeCatalog.count || 0)} models available from ${runtimeCatalog.source || 'LM Studio'}.`
@@ -40817,203 +40756,215 @@ function SettingsPage() {
           })]
         })
       })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Model Routing",
-      title: "Workflow Families",
-      description: "Switch grouped local-model families for screening and question answering. Legacy drafting roles remain available for rollback, but live document drafting now runs through ChatGPT.",
+    }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+      open: isSectionOpen('models'),
+      onToggle: () => toggleSection('models'),
+      summary: `${formatNumber(advancedProfiles.length)} profiles · ${modelStrategy.mode || 'lm_studio_local'} routing`,
+      title: "Models & Profiles",
       children: jsxRuntimeExports.jsx(DataState, {
         error: settings.error,
         loading: settings.loading,
         empty: !settings.data,
-        children: jsxRuntimeExports.jsx(ModelHotSwap, {
-          settings: settings.data,
-          onSaved: () => settings.refresh(),
-          onPing: pingModel,
-          loadingState: savingState
-        })
-      })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Advanced Routing",
-      title: "Role-Level Profiles",
-      description: "Fine-grained model control for individual roles, transports, commands, and fallback chains.",
-      children: jsxRuntimeExports.jsxs(DataState, {
-        error: settings.error,
-        loading: settings.loading,
-        empty: !settings.data,
-        children: [jsxRuntimeExports.jsx(ProfileInventory, {
-          profiles: advancedProfiles,
-          checks: runtimeChecks,
-          onPing: pingModel,
-          onDelete: deleteProfile,
-          loadingState: savingState
-        }), jsxRuntimeExports.jsxs("form", {
-          className: "form-grid form-compact",
-          onSubmit: saveProfile,
-          onChangeCapture: () => markDirty('profile'),
-          children: [jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Name"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.name,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                name: event.target.value
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Role"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.role,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                role: event.target.value
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Provider"
-            }), jsxRuntimeExports.jsx("input", {
-              value: "LM Studio",
-              readOnly: true
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Transport"
-            }), jsxRuntimeExports.jsx("input", {
-              value: "Local HTTP",
-              readOnly: true
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Model"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.model,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                model: event.target.value
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Base URL"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.base_url,
-              placeholder: LMSTUDIO_DEFAULT_HOST,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                base_url: event.target.value
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Temperature"
-            }), jsxRuntimeExports.jsx("input", {
-              type: "number",
-              step: "0.1",
-              value: profileForm.temperature,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                temperature: Number(event.target.value)
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Max Tokens"
-            }), jsxRuntimeExports.jsx("input", {
-              type: "number",
-              value: profileForm.max_tokens,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                max_tokens: Number(event.target.value)
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Preferred Context Window"
-            }), jsxRuntimeExports.jsx("input", {
-              type: "number",
-              value: profileForm.preferred_context_window,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                preferred_context_window: Number(event.target.value)
-              })
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Fallback Chain"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.fallback_chain_text,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                fallback_chain_text: event.target.value
-              }),
-              placeholder: "comma,separated,profile-names"
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            children: [jsxRuntimeExports.jsx("span", {
-              children: "Policy Tags"
-            }), jsxRuntimeExports.jsx("input", {
-              value: profileForm.policy_tags_text,
-              onChange: event => setProfileForm({
-                ...profileForm,
-                policy_tags_text: event.target.value
-              }),
-              placeholder: "draft,review,screen"
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            className: "checkbox-field",
-            children: [jsxRuntimeExports.jsx("input", {
-              type: "checkbox",
-              checked: Boolean(profileForm.supports_structured_output),
-              onChange: event => setProfileForm({
-                ...profileForm,
-                supports_structured_output: event.target.checked
-              })
-            }), jsxRuntimeExports.jsx("span", {
-              children: "Structured output"
-            })]
-          }), jsxRuntimeExports.jsxs("label", {
-            className: "checkbox-field",
-            children: [jsxRuntimeExports.jsx("input", {
-              type: "checkbox",
-              checked: Boolean(profileForm.local),
-              onChange: event => setProfileForm({
-                ...profileForm,
-                local: event.target.checked
-              })
-            }), jsxRuntimeExports.jsx("span", {
-              children: "Mark as local"
+        children: jsxRuntimeExports.jsxs("div", {
+          className: "section-stack",
+          children: [jsxRuntimeExports.jsxs("div", {
+            className: "subpanel settings-card",
+            children: [jsxRuntimeExports.jsx("div", {
+              className: "eyebrow",
+              children: "Workflow Families"
+            }), jsxRuntimeExports.jsx("div", {
+              className: "detail-line",
+              children: "Switch grouped local-model families for screening and question answering. Legacy drafting roles remain available for rollback, but live document drafting runs through ChatGPT."
+            }), jsxRuntimeExports.jsx(ModelHotSwap, {
+              settings: settings.data,
+              onSaved: () => settings.refresh(),
+              onPing: pingModel,
+              loadingState: savingState
             })]
           }), jsxRuntimeExports.jsxs("div", {
-            className: "form-actions span-all",
-            children: [jsxRuntimeExports.jsx("button", {
-              className: "button button-primary",
-              type: "submit",
-              disabled: Boolean(savingState.profile),
-              children: savingState.profile ? 'Saving...' : 'Save Profile'
-            }), jsxRuntimeExports.jsx("button", {
-              className: "button button-ghost",
-              type: "button",
-              onClick: () => pingModel({
-                name: profileForm.name || 'draft-profile',
-                role: profileForm.role,
-                provider: LMSTUDIO_DEFAULT_PROVIDER,
-                transport: 'local_http',
-                model: profileForm.model,
-                base_url: profileForm.base_url,
-                temperature: Number(profileForm.temperature || 0.2),
-                max_tokens: Number(profileForm.max_tokens || 8192),
-                preferred_context_window: Number(profileForm.preferred_context_window || 131072),
-                local: true,
-                command: [],
-                working_dir: ''
-              }, 'profileDraftPing'),
-              disabled: Boolean(savingState.profileDraftPing),
-              children: savingState.profileDraftPing ? 'Pinging...' : 'Ping Draft Profile'
+            className: "subpanel settings-card",
+            children: [jsxRuntimeExports.jsx("div", {
+              className: "eyebrow",
+              children: "Role-Level Profiles"
+            }), jsxRuntimeExports.jsx("div", {
+              className: "detail-line",
+              children: "Fine-grained control for individual roles, transports, commands, and fallback chains."
+            }), jsxRuntimeExports.jsx(ProfileInventory, {
+              profiles: advancedProfiles,
+              checks: runtimeChecks,
+              onPing: pingModel,
+              onDelete: deleteProfile,
+              loadingState: savingState
+            }), jsxRuntimeExports.jsxs("form", {
+              className: "form-grid form-compact",
+              onSubmit: saveProfile,
+              onChangeCapture: () => markDirty('profile'),
+              children: [jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Name"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.name,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    name: event.target.value
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Role"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.role,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    role: event.target.value
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Provider"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: "LM Studio",
+                  readOnly: true
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Transport"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: "Local HTTP",
+                  readOnly: true
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Model"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.model,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    model: event.target.value
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Base URL"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.base_url,
+                  placeholder: LMSTUDIO_DEFAULT_HOST,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    base_url: event.target.value
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Temperature"
+                }), jsxRuntimeExports.jsx("input", {
+                  type: "number",
+                  step: "0.1",
+                  value: profileForm.temperature,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    temperature: Number(event.target.value)
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Max Tokens"
+                }), jsxRuntimeExports.jsx("input", {
+                  type: "number",
+                  value: profileForm.max_tokens,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    max_tokens: Number(event.target.value)
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Preferred Context Window"
+                }), jsxRuntimeExports.jsx("input", {
+                  type: "number",
+                  value: profileForm.preferred_context_window,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    preferred_context_window: Number(event.target.value)
+                  })
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Fallback Chain"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.fallback_chain_text,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    fallback_chain_text: event.target.value
+                  }),
+                  placeholder: "comma,separated,profile-names"
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("span", {
+                  children: "Policy Tags"
+                }), jsxRuntimeExports.jsx("input", {
+                  value: profileForm.policy_tags_text,
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    policy_tags_text: event.target.value
+                  }),
+                  placeholder: "draft,review,screen"
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                className: "checkbox-field",
+                children: [jsxRuntimeExports.jsx("input", {
+                  type: "checkbox",
+                  checked: Boolean(profileForm.supports_structured_output),
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    supports_structured_output: event.target.checked
+                  })
+                }), jsxRuntimeExports.jsx("span", {
+                  children: "Structured output"
+                })]
+              }), jsxRuntimeExports.jsxs("label", {
+                className: "checkbox-field",
+                children: [jsxRuntimeExports.jsx("input", {
+                  type: "checkbox",
+                  checked: Boolean(profileForm.local),
+                  onChange: event => setProfileForm({
+                    ...profileForm,
+                    local: event.target.checked
+                  })
+                }), jsxRuntimeExports.jsx("span", {
+                  children: "Mark as local"
+                })]
+              }), jsxRuntimeExports.jsxs("div", {
+                className: "form-actions span-all",
+                children: [jsxRuntimeExports.jsx("button", {
+                  className: "button button-primary",
+                  type: "submit",
+                  disabled: Boolean(savingState.profile),
+                  children: savingState.profile ? 'Saving...' : 'Save Profile'
+                }), jsxRuntimeExports.jsx("button", {
+                  className: "button button-ghost",
+                  type: "button",
+                  onClick: () => pingModel({
+                    name: profileForm.name || 'draft-profile',
+                    role: profileForm.role,
+                    provider: LMSTUDIO_DEFAULT_PROVIDER,
+                    transport: 'local_http',
+                    model: profileForm.model,
+                    base_url: profileForm.base_url,
+                    temperature: Number(profileForm.temperature || 0.2),
+                    max_tokens: Number(profileForm.max_tokens || 8192),
+                    preferred_context_window: Number(profileForm.preferred_context_window || 131072),
+                    local: true,
+                    command: [],
+                    working_dir: ''
+                  }, 'profileDraftPing'),
+                  disabled: Boolean(savingState.profileDraftPing),
+                  children: savingState.profileDraftPing ? 'Pinging...' : 'Ping Draft Profile'
+                })]
+              })]
             })]
           })]
-        })]
+        })
       })
     })]
   });
@@ -41116,79 +41067,66 @@ function AutopilotPage({
       setNotice(err instanceof Error ? err.message : String(err));
     }
   }
+  const unresolvedCount = questionItems.filter(item => !item.has_approved_memory).length;
+  const [timelineOpen, setTimelineOpen] = reactExports.useState(false);
   return jsxRuntimeExports.jsxs("div", {
     className: "page-stack",
     children: [jsxRuntimeExports.jsx(Section, {
       eyebrow: "Autopilot",
-      title: "Queue And Live Activity",
-      description: "Long-running work stays visible across navigation and reloads because button state now derives from the backend live run state.",
-      actions: jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, {
-        children: [jsxRuntimeExports.jsx("button", {
-          className: "button button-primary",
-          type: "button",
-          onClick: startDiscover,
-          disabled: operator.isRunning,
-          children: operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'
-        }), jsxRuntimeExports.jsx("button", {
-          className: "button button-primary",
-          type: "button",
-          onClick: startAutonomous,
-          disabled: operator.isRunning,
-          children: operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'
-        }), jsxRuntimeExports.jsx("button", {
-          className: "button button-ghost",
-          type: "button",
-          onClick: resetOperationalData,
-          disabled: resetting,
-          children: resetting ? 'Resetting' : 'Reset Operational Data'
-        }), jsxRuntimeExports.jsx("button", {
-          className: "button button-ghost",
-          type: "button",
-          onClick: purgeRejected,
-          children: "Purge Rejected"
-        })]
-      }),
-      children: jsxRuntimeExports.jsx(DataState, {
+      title: "Execution Workspace",
+      description: "Run controls, queue metrics, and unresolved inputs on the left. Application table and live timeline on the right.",
+      children: jsxRuntimeExports.jsxs(DataState, {
         error: auto.error,
         loading: auto.loading,
         empty: !auto.data,
-        children: jsxRuntimeExports.jsxs("div", {
-          className: "section-stack",
-          children: [jsxRuntimeExports.jsx(CurrentProcessPanel, {
-            operator: operator,
-            compact: true
-          }), jsxRuntimeExports.jsx(InlineNotice, {
-            message: notice,
-            tone: toneFor(notice)
-          }), jsxRuntimeExports.jsx(MetricGrid, {
+        children: [jsxRuntimeExports.jsx(RunStatusSummaryCard, {
+          actions: jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, {
+            children: [jsxRuntimeExports.jsx("button", {
+              className: "button button-primary",
+              type: "button",
+              onClick: startDiscover,
+              disabled: operator.isRunning,
+              children: operator.isRunning && operator.runType === 'discover' ? 'Discovery Running' : 'Discover Jobs'
+            }), jsxRuntimeExports.jsx("button", {
+              className: "button button-primary",
+              type: "button",
+              onClick: startAutonomous,
+              disabled: operator.isRunning,
+              children: operator.isRunning && operator.runType === 'autonomous' ? 'Full Run Running' : 'Full Run'
+            }), jsxRuntimeExports.jsx("button", {
+              className: "button button-ghost",
+              type: "button",
+              onClick: resetOperationalData,
+              disabled: resetting,
+              children: resetting ? 'Resetting' : 'Reset Operational Data'
+            }), jsxRuntimeExports.jsx("button", {
+              className: "button button-ghost",
+              type: "button",
+              onClick: purgeRejected,
+              children: "Purge Rejected"
+            })]
+          }),
+          description: "Start discovery, run the full pipeline, and monitor queue movement here.",
+          operator: operator,
+          title: operator.isRunning ? `${String(operator.runType || 'run').replace(/_/g, ' ')} in progress` : 'Ready to run'
+        }), jsxRuntimeExports.jsx(InlineNotice, {
+          message: notice,
+          tone: toneFor(notice)
+        })]
+      })
+    }), jsxRuntimeExports.jsxs("div", {
+      className: "autopilot-grid",
+      children: [jsxRuntimeExports.jsxs("div", {
+        className: "autopilot-grid-left",
+        children: [jsxRuntimeExports.jsx(DataState, {
+          error: auto.error,
+          loading: auto.loading,
+          empty: !auto.data,
+          children: jsxRuntimeExports.jsx(MetricGrid, {
             items: [{
-              label: 'Enabled',
-              value: auto.data?.enabled ? 'on' : 'off',
-              note: 'automation switch'
-            }, {
-              label: 'Submit',
-              value: auto.data?.submit_enabled ? 'on' : 'off',
-              note: 'submission toggle'
-            }, {
-              label: 'Submit Mode',
-              value: auto.data?.default_submit_mode || '-',
-              note: 'current submit strategy'
-            }, {
               label: 'Daily Max',
               value: `${formatNumber(auto.data?.daily_submitted_today || 0)} / ${formatNumber(auto.data?.daily_submit_cap || 0)}`,
-              note: auto.data?.daily_submit_cap ? `submissions recorded today; ${formatNumber(auto.data?.daily_remaining_capacity || 0)} remaining before the run stops` : 'daily cap not configured'
-            }, {
-              label: 'Source Mode',
-              value: auto.data?.source_mode === 'greenhouse_launch_mode' ? 'Greenhouse launch mode' : 'Mixed / experimental',
-              note: auto.data?.experimental_sources_enabled?.length ? `experimental on: ${auto.data.experimental_sources_enabled.join(', ')}` : 'experimental sources available but off'
-            }, {
-              label: 'Drafting Mode',
-              value: auto.data?.drafting_mode === 'serial' ? 'serial' : 'parallel',
-              note: auto.data?.drafting_mode === 'serial' ? 'draft, prepare, and apply one job at a time' : 'multiple drafts can run before apply begins'
-            }, {
-              label: 'Ready Threshold',
-              value: formatNumber(auto.data?.ready_to_apply_threshold || 10),
-              note: auto.data?.configured_ready_to_apply_threshold && auto.data?.configured_ready_to_apply_threshold !== auto.data?.ready_to_apply_threshold ? `effective threshold ${formatNumber(auto.data?.ready_to_apply_threshold || 10)} from configured ${formatNumber(auto.data?.configured_ready_to_apply_threshold || 10)}` : 'start apply at this depth'
+              note: `${formatNumber(auto.data?.daily_remaining_capacity || 0)} remaining`
             }, {
               label: 'Queue Depth',
               value: formatNumber(auto.data?.queue_depth || operator.queue.depth),
@@ -41196,7 +41134,7 @@ function AutopilotPage({
             }, {
               label: 'Blocked',
               value: formatNumber(auto.data?.blocked_by_questions || auto.data?.blocked_applications || operator.queue.blocked),
-              note: 'manual answers needed'
+              note: 'answers needed'
             }, {
               label: 'Prompts',
               value: formatNumber(auto.data?.unresolved_prompts || operator.queue.pendingQuestions),
@@ -41206,170 +41144,982 @@ function AutopilotPage({
               value: auto.data?.drafting_batch?.member_count ? `${formatNumber(auto.data?.drafting_batch?.completed_count || 0)} / ${formatNumber(auto.data?.drafting_batch?.member_count || 0)}` : '-',
               note: describeDraftBatch(auto.data?.drafting_batch, auto.data?.ready_to_apply_threshold || 10)
             }, {
-              label: 'Active Draft Tabs',
-              value: formatNumber(auto.data?.drafting_batch?.active_worker_count || auto.data?.drafting_batch?.active_count || 0),
-              note: `live ChatGPT tabs for the current batch (parallel cap ${formatNumber(auto.data?.drafting_parallel_limit || 0) || 0})`
-            }, {
-              label: 'Temp Chat',
-              value: operator.temporaryChatStatus || '-',
-              note: operator.temporaryChatCheckedAt || 'no drafting preflight recorded yet'
+              label: 'Drafting Mode',
+              value: auto.data?.drafting_mode === 'serial' ? 'serial' : 'parallel',
+              note: auto.data?.drafting_mode === 'serial' ? 'one at a time' : 'concurrent'
             }]
-          })]
-        })
-      })
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Questions",
-      title: "Unresolved Inputs",
-      description: "Only the prompts that could not be safely answered are surfaced here.",
-      children: jsxRuntimeExports.jsxs(DataState, {
-        error: questions.error,
-        loading: questions.loading,
-        empty: !questionItems.length,
-        emptyLabel: "No manual questions.",
-        emptyDetail: "The queue is either ready to apply or waiting on discovery and drafting.",
-        children: [jsxRuntimeExports.jsx(InlineNotice, {
-          message: notice,
-          tone: toneFor(notice)
-        }), jsxRuntimeExports.jsx("div", {
-          className: "question-list",
-          children: questionItems.map(item => {
-            const key = answerKey(item);
-            const options = questionOptions(item);
-            const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(item, item.existing_answer ?? '');
-            const isCheckboxGroup = item.widget_type === 'checkbox_group' && options.length > 0;
-            const isSelect = options.length > 0 && !isCheckboxGroup;
-            const selectedValues = Array.isArray(value) ? value : [];
-            return jsxRuntimeExports.jsxs("article", {
-              className: "question-card",
-              children: [jsxRuntimeExports.jsxs("div", {
-                className: "activity-meta",
-                children: [jsxRuntimeExports.jsx(Badge, {
-                  tone: item.has_approved_memory ? 'success' : 'warning',
-                  children: item.question_type
-                }), jsxRuntimeExports.jsx("span", {
-                  children: item.company
-                }), jsxRuntimeExports.jsx("span", {
-                  children: item.title
-                })]
-              }), jsxRuntimeExports.jsx("strong", {
-                children: item.prompt_text
-              }), jsxRuntimeExports.jsxs("div", {
-                className: "answer-row",
-                children: [isCheckboxGroup ? jsxRuntimeExports.jsx("div", {
-                  className: "detail-stack",
-                  children: options.map(option => jsxRuntimeExports.jsxs("label", {
-                    children: [jsxRuntimeExports.jsx("input", {
-                      checked: selectedValues.includes(option.label),
-                      onChange: event => setAnswers(current => {
-                        const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues;
-                        const selected = Array.isArray(base) ? [...base] : [];
-                        return {
-                          ...current,
-                          [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter(entry => entry !== option.label)
-                        };
-                      }),
-                      type: "checkbox"
-                    }), " ", option.label]
-                  }, `${item.question_id}-${option.label}`))
-                }) : isSelect ? jsxRuntimeExports.jsxs("select", {
-                  value: String(value ?? ''),
-                  onChange: event => setAnswers(current => ({
-                    ...current,
-                    [key]: event.target.value
-                  })),
-                  children: [jsxRuntimeExports.jsx("option", {
-                    value: "",
-                    children: "Select answer"
-                  }), options.map(option => jsxRuntimeExports.jsx("option", {
-                    value: option.label,
-                    children: option.label
-                  }, `${item.question_id}-${option.value}-${option.label}`))]
-                }) : jsxRuntimeExports.jsx("input", {
-                  value: String(value ?? ''),
-                  onChange: event => setAnswers(current => ({
-                    ...current,
-                    [key]: event.target.value
-                  })),
-                  placeholder: "Type answer"
-                }), jsxRuntimeExports.jsx("button", {
-                  className: "button button-primary",
-                  type: "button",
-                  onClick: () => submitAnswer(item),
-                  children: "Save Answer"
-                })]
-              }), jsxRuntimeExports.jsx("div", {
-                className: "cell-meta",
-                children: "Saved answers are reused automatically the next time this prompt appears."
-              })]
-            }, `${item.application_id}-${item.question_id}`);
+          })
+        }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+          open: unresolvedCount > 0,
+          onToggle: () => {},
+          summary: `${formatNumber(questionItems.length)} total · ${formatNumber(unresolvedCount)} unresolved`,
+          title: "Question Queue",
+          children: jsxRuntimeExports.jsx(DataState, {
+            error: questions.error,
+            loading: questions.loading,
+            empty: !questionItems.length,
+            emptyLabel: "No manual questions.",
+            emptyDetail: "The queue is either ready to apply or waiting on discovery and drafting.",
+            children: jsxRuntimeExports.jsx("div", {
+              className: "question-list",
+              children: questionItems.map(item => {
+                const key = answerKey(item);
+                const options = questionOptions(item);
+                const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(item, item.existing_answer ?? '');
+                const isCheckboxGroup = item.widget_type === 'checkbox_group' && options.length > 0;
+                const isSelect = options.length > 0 && !isCheckboxGroup;
+                const selectedValues = Array.isArray(value) ? value : [];
+                return jsxRuntimeExports.jsxs("article", {
+                  className: "question-card",
+                  children: [jsxRuntimeExports.jsxs("div", {
+                    className: "activity-meta",
+                    children: [jsxRuntimeExports.jsx(Badge, {
+                      tone: item.has_approved_memory ? 'success' : 'warning',
+                      children: item.question_type
+                    }), jsxRuntimeExports.jsx("span", {
+                      children: item.company
+                    }), jsxRuntimeExports.jsx("span", {
+                      children: item.title
+                    })]
+                  }), jsxRuntimeExports.jsx("strong", {
+                    children: item.prompt_text
+                  }), jsxRuntimeExports.jsxs("div", {
+                    className: "answer-row",
+                    children: [isCheckboxGroup ? jsxRuntimeExports.jsx("div", {
+                      className: "detail-stack",
+                      children: options.map(option => jsxRuntimeExports.jsxs("label", {
+                        children: [jsxRuntimeExports.jsx("input", {
+                          checked: selectedValues.includes(option.label),
+                          onChange: event => setAnswers(current => {
+                            const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues;
+                            const selected = Array.isArray(base) ? [...base] : [];
+                            return {
+                              ...current,
+                              [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter(entry => entry !== option.label)
+                            };
+                          }),
+                          type: "checkbox"
+                        }), " ", option.label]
+                      }, `${item.question_id}-${option.label}`))
+                    }) : isSelect ? jsxRuntimeExports.jsxs("select", {
+                      value: String(value ?? ''),
+                      onChange: event => setAnswers(current => ({
+                        ...current,
+                        [key]: event.target.value
+                      })),
+                      children: [jsxRuntimeExports.jsx("option", {
+                        value: "",
+                        children: "Select answer"
+                      }), options.map(option => jsxRuntimeExports.jsx("option", {
+                        value: option.label,
+                        children: option.label
+                      }, `${item.question_id}-${option.value}-${option.label}`))]
+                    }) : jsxRuntimeExports.jsx("input", {
+                      value: String(value ?? ''),
+                      onChange: event => setAnswers(current => ({
+                        ...current,
+                        [key]: event.target.value
+                      })),
+                      placeholder: "Type answer"
+                    }), jsxRuntimeExports.jsx("button", {
+                      className: "button button-primary",
+                      type: "button",
+                      onClick: () => submitAnswer(item),
+                      children: "Save Answer"
+                    })]
+                  }), jsxRuntimeExports.jsx("div", {
+                    className: "cell-meta",
+                    children: "Saved answers are reused automatically the next time this prompt appears."
+                  })]
+                }, `${item.application_id}-${item.question_id}`);
+              })
+            })
           })
         })]
-      })
-    }), jsxRuntimeExports.jsx(LiveTimelineSection, {
-      operator: operator,
-      live: live,
-      eyebrow: "Live Activity",
-      title: "Operator Timeline",
-      description: "The active run feed is backed by persisted events and trace refs, so blocked submit and silent model failures stop looking like idle UI."
-    }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Queue",
-      title: "Applications Table",
-      description: "Operational queue view prioritized around blocker state and actionability.",
-      children: jsxRuntimeExports.jsx(DataState, {
-        error: jobs.error,
-        loading: jobs.loading,
-        empty: !jobItems.length,
-        emptyLabel: "No jobs in the queue.",
-        children: jsxRuntimeExports.jsx(JobsTable, {
-          rows: jobItems,
-          onApply: applyFromTable
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "autopilot-grid-right",
+        children: [jsxRuntimeExports.jsx(DataState, {
+          error: jobs.error,
+          loading: jobs.loading,
+          empty: !jobItems.length,
+          emptyLabel: "No jobs in the queue.",
+          children: jsxRuntimeExports.jsx(JobsTable, {
+            rows: jobItems,
+            onApply: applyFromTable
+          })
+        }), jsxRuntimeExports.jsx(ConsoleDisclosure, {
+          open: timelineOpen || operator.isRunning,
+          onToggle: () => setTimelineOpen(c => !c),
+          summary: operator.isRunning ? 'Active run in progress' : 'Last run events',
+          title: "Live Timeline",
+          children: jsxRuntimeExports.jsx(LiveTimelineSection, {
+            operator: operator,
+            live: live,
+            eyebrow: "Live Activity",
+            title: "Operator Timeline",
+            description: "The active run feed is backed by persisted events and trace refs."
+          })
+        })]
+      })]
+    })]
+  });
+}
+const REVIEW_SECTION_FROM_TAB = {
+  summary: 'needs_attention',
+  questions: 'questions',
+  handoff: 'handoff',
+  artifacts: 'documents',
+  history: 'advanced'
+};
+const REVIEW_TAB_FROM_SECTION = {
+  needs_attention: 'summary',
+  questions: 'questions',
+  handoff: 'handoff',
+  documents: 'artifacts',
+  advanced: 'history'
+};
+const REVIEW_QUEUE_FILTERS = [{
+  key: 'all',
+  label: 'All'
+}, {
+  key: 'needs_input',
+  label: 'Needs Input'
+}, {
+  key: 'manual_handoff',
+  label: 'Manual Handoff'
+}, {
+  key: 'ready',
+  label: 'Ready'
+}];
+const REVIEW_ACTION_LABELS = {
+  approve: 'Approve / Apply',
+  request_input: 'Open For Manual Input',
+  sync_manual_input: 'Sync Browser Changes',
+  mark_submitted: 'Mark As Submitted',
+  reject: 'Reject',
+  save_answers: 'Save Answers',
+  review_summary: 'Review Summary'
+};
+const REVIEW_SEVERITY_WEIGHT = {
+  danger: 3,
+  warning: 2,
+  success: 1,
+  neutral: 0
+};
+function reviewActionLabel(action) {
+  return REVIEW_ACTION_LABELS[action] || String(action || 'Review').replace(/_/g, ' ');
+}
+function reviewActionTone(action) {
+  if (action === 'approve' || action === 'mark_submitted') return 'success';
+  if (action === 'reject') return 'danger';
+  if (action === 'sync_manual_input' || action === 'request_input' || action === 'save_answers') return 'warning';
+  return 'neutral';
+}
+function reviewSectionFromTab(tab) {
+  return REVIEW_SECTION_FROM_TAB[String(tab || '').toLowerCase()] || 'needs_attention';
+}
+function reviewTabForSection(section) {
+  return REVIEW_TAB_FROM_SECTION[section] || 'summary';
+}
+function reviewSeverityWeight(summary) {
+  return REVIEW_SEVERITY_WEIGHT[String(summary?.severity || 'neutral')] ?? 0;
+}
+function reviewSortComparator(sortState) {
+  const compareString = (left, right) => String(left || '').localeCompare(String(right || ''), undefined, {
+    sensitivity: 'base'
+  });
+  return (left, right) => {
+    {
+      const severityDelta = reviewSeverityWeight(right.review_summary) - reviewSeverityWeight(left.review_summary);
+      if (severityDelta) return severityDelta;
+      const blockerDelta = safeNumber(right.review_summary?.blocker_count) - safeNumber(left.review_summary?.blocker_count);
+      if (blockerDelta) return blockerDelta;
+      return compareString(left.company, right.company);
+    }
+  };
+}
+function queueMatchesSearch(item, search) {
+  const text = String(search || '').trim().toLowerCase();
+  if (!text) return true;
+  const haystack = [item.company, item.title, item.source, item.review_status, item.status, item.classification?.ats_family, item.classification?.board_family, item.review_summary?.next_action, ...(item.review_summary?.blocker_labels || []), ...(item.review_summary?.warning_labels || []), ...(item.remaining_blockers || []).map(blocker => blocker?.label || blocker?.category)].filter(Boolean).join(' ').toLowerCase();
+  return haystack.includes(text);
+}
+function isEditableShortcutTarget(target) {
+  if (!target || !(target instanceof HTMLElement)) return false;
+  const tag = String(target.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button' || Boolean(target.isContentEditable);
+}
+function reviewQueueMatchesFilter(item, filterKey) {
+  const summary = item.review_summary || {};
+  const handoff = item.manual_handoff || {};
+  const unresolvedCount = safeNumber(summary.unresolved_question_count);
+  const blockerCount = safeNumber(summary.blocker_count);
+  const readyForSubmit = Boolean(summary.ready_for_submit) || blockerCount === 0 && unresolvedCount === 0 && !handoff.active;
+  if (filterKey === 'needs_input') return blockerCount > 0 || unresolvedCount > 0;
+  if (filterKey === 'manual_handoff') return Boolean(handoff.active);
+  if (filterKey === 'ready') return readyForSubmit && !handoff.active;
+  return true;
+}
+function reviewQueueAttentionSummary(item) {
+  const summary = item.review_summary || {};
+  const handoff = item.manual_handoff || {};
+  const blockerCount = safeNumber(summary.blocker_count);
+  const warningCount = safeNumber(summary.warning_count);
+  const unresolvedCount = safeNumber(summary.unresolved_question_count);
+  if (blockerCount > 0) return `${formatNumber(blockerCount)} blocker${blockerCount === 1 ? '' : 's'} to clear`;
+  if (unresolvedCount > 0) return `${formatNumber(unresolvedCount)} answer${unresolvedCount === 1 ? '' : 's'} still needed`;
+  if (handoff.active) return 'Manual handoff is open';
+  if (warningCount > 0) return `${formatNumber(warningCount)} warning${warningCount === 1 ? '' : 's'} to review`;
+  return 'Ready to move forward';
+}
+function reviewQueueSupportingMeta(item) {
+  return dedupeStrings([item.classification?.ats_family || item.classification?.board_family || '', item.source || '']).join(' / ');
+}
+function reviewSourceMeta(detail) {
+  return dedupeStrings([detail?.application?.source || '', detail?.summary?.classification?.ats_family || detail?.job?.ats_family || '']).join(' / ');
+}
+function reviewArtifactForKinds(artifacts, ...kinds) {
+  return (artifacts || []).find(artifact => kinds.includes(artifact.kind)) || null;
+}
+function ReviewQueueInbox({
+  items,
+  selectedId,
+  onSelect
+}) {
+  return jsxRuntimeExports.jsx("div", {
+    className: "table-wrap review-table-wrap",
+    children: jsxRuntimeExports.jsxs("table", {
+      className: "data-table review-data-table review-compact-table",
+      children: [jsxRuntimeExports.jsx("thead", {
+        children: jsxRuntimeExports.jsxs("tr", {
+          children: [jsxRuntimeExports.jsx("th", {
+            children: "Company / Role"
+          }), jsxRuntimeExports.jsx("th", {
+            children: "Review State"
+          }), jsxRuntimeExports.jsx("th", {
+            children: "Needs Attention"
+          }), jsxRuntimeExports.jsx("th", {
+            children: "Next Step"
+          })]
         })
+      }), jsxRuntimeExports.jsx("tbody", {
+        children: items.map(item => {
+          const summary = item.review_summary || {};
+          const handoff = item.manual_handoff || {};
+          return jsxRuntimeExports.jsxs("tr", {
+            className: `review-row-table ${selectedId === item.application_id ? 'selected' : ''}`.trim(),
+            onClick: () => onSelect(item.application_id),
+            children: [jsxRuntimeExports.jsx("td", {
+              children: jsxRuntimeExports.jsxs("div", {
+                className: "review-cell-stack",
+                children: [jsxRuntimeExports.jsx("strong", {
+                  children: item.company
+                }), jsxRuntimeExports.jsx("div", {
+                  className: "cell-meta",
+                  children: item.title
+                }), reviewQueueSupportingMeta(item) ? jsxRuntimeExports.jsx("div", {
+                  className: "cell-meta",
+                  children: reviewQueueSupportingMeta(item)
+                }) : null]
+              })
+            }), jsxRuntimeExports.jsx("td", {
+              children: jsxRuntimeExports.jsxs("div", {
+                className: "review-cell-stack",
+                children: [jsxRuntimeExports.jsx(Badge, {
+                  tone: toneFor(summary.severity || item.review_status || item.status),
+                  children: item.review_status || item.status
+                }), jsxRuntimeExports.jsx("div", {
+                  className: "cell-meta",
+                  children: handoff.active ? 'Manual handoff active' : item.status || '-'
+                })]
+              })
+            }), jsxRuntimeExports.jsx("td", {
+              children: jsxRuntimeExports.jsxs("div", {
+                className: "review-cell-stack",
+                children: [jsxRuntimeExports.jsx(Badge, {
+                  tone: summary.blocker_count ? 'danger' : summary.warning_count ? 'warning' : handoff.active ? 'warning' : 'success',
+                  children: reviewQueueAttentionSummary(item)
+                }), jsxRuntimeExports.jsx("div", {
+                  className: "cell-meta",
+                  children: summary.unresolved_question_count ? `${formatNumber(summary.unresolved_question_count)} question${summary.unresolved_question_count === 1 ? '' : 's'} still open` : handoff.active ? `Watching ${formatNumber(handoff.pending_count || 0)} pending field${safeNumber(handoff.pending_count) === 1 ? '' : 's'}` : 'Nothing blocking right now'
+                })]
+              })
+            }), jsxRuntimeExports.jsx("td", {
+              children: jsxRuntimeExports.jsxs("div", {
+                className: "review-cell-stack",
+                children: [jsxRuntimeExports.jsx(Badge, {
+                  tone: reviewActionTone(summary.next_action),
+                  children: reviewActionLabel(summary.next_action)
+                }), jsxRuntimeExports.jsx("div", {
+                  className: "cell-meta",
+                  children: summary.next_action_reason || '-'
+                })]
+              })
+            })]
+          }, item.application_id);
+        })
+      })]
+    })
+  });
+}
+function ReviewMoreMenu({
+  onSelectAction
+}) {
+  const [open, setOpen] = reactExports.useState(false);
+  const menuRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = event => {
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [open]);
+  return jsxRuntimeExports.jsxs("div", {
+    className: "review-more-menu",
+    ref: menuRef,
+    children: [jsxRuntimeExports.jsx("button", {
+      "aria-expanded": open,
+      className: "button button-ghost review-more-trigger",
+      type: "button",
+      onClick: () => setOpen(current => !current),
+      children: "More"
+    }), open ? jsxRuntimeExports.jsxs("div", {
+      className: "review-more-panel",
+      children: [jsxRuntimeExports.jsx("button", {
+        className: "button button-ghost",
+        type: "button",
+        onClick: () => {
+          setOpen(false);
+          onSelectAction('mark_submitted');
+        },
+        children: "Mark As Submitted"
+      }), jsxRuntimeExports.jsx("button", {
+        className: "button button-ghost",
+        type: "button",
+        onClick: () => {
+          setOpen(false);
+          onSelectAction('reject');
+        },
+        children: "Reject"
+      })]
+    }) : null]
+  });
+}
+function ReviewDisclosure({
+  title,
+  summary,
+  open,
+  onToggle,
+  children
+}) {
+  return jsxRuntimeExports.jsxs("section", {
+    className: `review-section review-disclosure ${open ? 'open' : ''}`.trim(),
+    children: [jsxRuntimeExports.jsxs("button", {
+      "aria-expanded": open,
+      className: "review-disclosure-toggle",
+      type: "button",
+      onClick: onToggle,
+      children: [jsxRuntimeExports.jsxs("div", {
+        children: [jsxRuntimeExports.jsx("strong", {
+          children: title
+        }), summary ? jsxRuntimeExports.jsx("div", {
+          className: "cell-meta",
+          children: summary
+        }) : null]
+      }), jsxRuntimeExports.jsx("span", {
+        className: "review-disclosure-state",
+        children: open ? 'Hide' : 'Show'
+      })]
+    }), open ? jsxRuntimeExports.jsx("div", {
+      className: "review-disclosure-body",
+      children: children
+    }) : null]
+  });
+}
+function ReviewQuestionsPanel({
+  questions,
+  selectedId,
+  answers,
+  setAnswers,
+  onSave
+}) {
+  const unresolved = (questions || []).filter(question => question.needs_user_input);
+  const resolved = (questions || []).filter(question => !question.needs_user_input);
+  const [showResolved, setShowResolved] = reactExports.useState(false);
+  return jsxRuntimeExports.jsxs("div", {
+    className: "detail-stack",
+    children: [unresolved.length ? jsxRuntimeExports.jsx("div", {
+      className: "detail-stack",
+      children: unresolved.map(question => {
+        const key = `${selectedId}::${question.question_id}`;
+        const options = questionOptions(question);
+        const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(question, question.existing_answer ?? '');
+        const isCheckboxGroup = question.widget_type === 'checkbox_group' && options.length > 0;
+        const isSelect = options.length > 0 && !isCheckboxGroup;
+        const selectedValues = Array.isArray(value) ? value : [];
+        return jsxRuntimeExports.jsxs("div", {
+          className: "question-card",
+          children: [jsxRuntimeExports.jsxs("div", {
+            className: "activity-meta",
+            children: [jsxRuntimeExports.jsx(Badge, {
+              tone: question.required ? 'warning' : 'neutral',
+              children: question.required ? 'required' : 'optional'
+            }), jsxRuntimeExports.jsx("span", {
+              children: question.question_type || question.widget_type || 'question'
+            }), jsxRuntimeExports.jsx("span", {
+              children: question.verification_status || 'needs_user_input'
+            })]
+          }), jsxRuntimeExports.jsx("strong", {
+            children: question.prompt_text
+          }), jsxRuntimeExports.jsxs("div", {
+            className: "answer-row",
+            children: [isCheckboxGroup ? jsxRuntimeExports.jsx("div", {
+              className: "detail-stack checkbox-stack",
+              children: options.map(option => jsxRuntimeExports.jsxs("label", {
+                children: [jsxRuntimeExports.jsx("input", {
+                  checked: selectedValues.includes(option.label),
+                  onChange: event => setAnswers(current => {
+                    const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues;
+                    const selected = Array.isArray(base) ? [...base] : [];
+                    return {
+                      ...current,
+                      [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter(entry => entry !== option.label)
+                    };
+                  }),
+                  type: "checkbox"
+                }), " ", option.label]
+              }, `${question.question_id}-${option.label}`))
+            }) : isSelect ? jsxRuntimeExports.jsxs("select", {
+              value: String(value ?? ''),
+              onChange: event => setAnswers(current => ({
+                ...current,
+                [key]: event.target.value
+              })),
+              children: [jsxRuntimeExports.jsx("option", {
+                value: "",
+                children: "Select answer"
+              }), options.map(option => jsxRuntimeExports.jsx("option", {
+                value: option.label,
+                children: option.label
+              }, `${question.question_id}-${option.value}-${option.label}`))]
+            }) : jsxRuntimeExports.jsx("input", {
+              value: String(value ?? ''),
+              onChange: event => setAnswers(current => ({
+                ...current,
+                [key]: event.target.value
+              })),
+              placeholder: "Type answer"
+            }), jsxRuntimeExports.jsx("button", {
+              className: "button button-primary",
+              type: "button",
+              onClick: () => onSave(question),
+              children: "Save Answer"
+            })]
+          }), jsxRuntimeExports.jsx("div", {
+            className: "cell-meta",
+            children: "Saved answers are reused automatically the next time this prompt appears."
+          })]
+        }, question.question_id);
       })
+    }) : jsxRuntimeExports.jsx("div", {
+      className: "detail-line",
+      children: "No unanswered questions right now."
+    }), resolved.length ? jsxRuntimeExports.jsxs("div", {
+      className: "detail-stack",
+      children: [jsxRuntimeExports.jsx("button", {
+        className: "button button-ghost review-inline-toggle",
+        type: "button",
+        onClick: () => setShowResolved(current => !current),
+        children: showResolved ? 'Hide Saved Answers' : `Show Saved Answers (${formatNumber(resolved.length)})`
+      }), showResolved ? jsxRuntimeExports.jsx("div", {
+        className: "detail-stack",
+        children: resolved.map(question => jsxRuntimeExports.jsxs("div", {
+          className: "review-resolved-answer",
+          children: [jsxRuntimeExports.jsx("div", {
+            className: "detail-line",
+            children: jsxRuntimeExports.jsx("strong", {
+              children: question.prompt_text
+            })
+          }), jsxRuntimeExports.jsx("div", {
+            className: "cell-meta",
+            children: question.existing_answer || 'Saved with no visible answer text.'
+          })]
+        }, question.question_id))
+      }) : null]
+    }) : null]
+  });
+}
+function ReviewNeedsAttentionPanel({
+  detail
+}) {
+  const application = detail?.application || {};
+  const summary = detail?.summary || {};
+  const blockers = detail?.blockers || [];
+  const warningBlockers = blockers.filter(blocker => blocker?.category === 'warning');
+  const primaryBlockers = blockers.filter(blocker => blocker?.category !== 'warning');
+  const compactStats = [{
+    label: 'Questions',
+    value: formatNumber(summary.unresolved_question_count || 0)
+  }, {
+    label: 'Missing',
+    value: formatNumber(summary.missing_required_count || 0)
+  }, {
+    label: 'Warnings',
+    value: formatNumber(summary.warning_count || 0)
+  }];
+  return jsxRuntimeExports.jsxs("section", {
+    className: "review-section",
+    children: [jsxRuntimeExports.jsxs("div", {
+      className: "review-section-heading",
+      children: [jsxRuntimeExports.jsxs("div", {
+        children: [jsxRuntimeExports.jsx("div", {
+          className: "eyebrow",
+          children: "Needs Attention"
+        }), jsxRuntimeExports.jsx("h3", {
+          children: "What needs your attention"
+        })]
+      }), jsxRuntimeExports.jsx(Badge, {
+        tone: reviewActionTone(summary.next_action),
+        children: reviewActionLabel(summary.next_action)
+      })]
+    }), jsxRuntimeExports.jsx("p", {
+      className: "section-copy",
+      children: summary.next_action_reason || `Review ${application.company || 'this application'} and decide the next step.`
+    }), jsxRuntimeExports.jsx("div", {
+      className: "review-stat-strip",
+      children: compactStats.map(item => jsxRuntimeExports.jsxs("div", {
+        className: "review-stat-pill",
+        children: [jsxRuntimeExports.jsx("span", {
+          children: item.label
+        }), jsxRuntimeExports.jsx("strong", {
+          children: item.value
+        })]
+      }, item.label))
+    }), primaryBlockers.length ? jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Blockers"
+      }), jsxRuntimeExports.jsx("div", {
+        className: "detail-stack",
+        children: primaryBlockers.map((blocker, index) => jsxRuntimeExports.jsxs("div", {
+          className: "review-chip-row",
+          children: [jsxRuntimeExports.jsx(Badge, {
+            tone: "danger",
+            children: blocker?.category || 'blocker'
+          }), jsxRuntimeExports.jsx("div", {
+            className: "cell-meta",
+            children: blockerLabel(blocker)
+          })]
+        }, `${blockerLabel(blocker)}-${index}`))
+      })]
+    }) : null, warningBlockers.length ? jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Warnings"
+      }), jsxRuntimeExports.jsx("div", {
+        className: "detail-stack",
+        children: warningBlockers.map((blocker, index) => jsxRuntimeExports.jsxs("div", {
+          className: "review-chip-row",
+          children: [jsxRuntimeExports.jsx(Badge, {
+            tone: "warning",
+            children: "warning"
+          }), jsxRuntimeExports.jsx("div", {
+            className: "cell-meta",
+            children: blockerLabel(blocker)
+          })]
+        }, `${blockerLabel(blocker)}-${index}`))
+      })]
+    }) : null, !primaryBlockers.length && !warningBlockers.length ? jsxRuntimeExports.jsx("div", {
+      className: "subpanel",
+      children: jsxRuntimeExports.jsx("div", {
+        className: "detail-line",
+        children: "Nothing is blocked right now. You can review the documents, continue with manual input, or apply."
+      })
+    }) : null]
+  });
+}
+function ReviewDocumentsPanel({
+  detail
+}) {
+  const artifacts = detail?.artifacts || [];
+  const primaryDocuments = [{
+    label: 'Resume PDF',
+    artifact: reviewArtifactForKinds(artifacts, 'resume_pdf')
+  }, {
+    label: 'Cover Letter PDF',
+    artifact: reviewArtifactForKinds(artifacts, 'cover_letter_pdf')
+  }, {
+    label: 'Evaluation Report',
+    artifact: reviewArtifactForKinds(artifacts, 'evaluation_report')
+  }, {
+    label: 'Job Posting',
+    artifact: reviewArtifactForKinds(artifacts, 'job_posting')
+  }];
+  const supporting = artifacts.filter(item => item.group === 'supporting');
+  return jsxRuntimeExports.jsxs("div", {
+    className: "detail-stack",
+    children: [jsxRuntimeExports.jsx("div", {
+      className: "review-document-list",
+      children: primaryDocuments.map(item => jsxRuntimeExports.jsxs("div", {
+        className: "review-document-row",
+        children: [jsxRuntimeExports.jsxs("div", {
+          children: [jsxRuntimeExports.jsx("strong", {
+            children: item.label
+          }), jsxRuntimeExports.jsx("div", {
+            className: "cell-meta",
+            children: item.artifact?.relative_path || item.artifact?.target || `No ${item.label.toLowerCase()} recorded yet.`
+          })]
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "review-document-actions",
+          children: [jsxRuntimeExports.jsx(Badge, {
+            tone: item.artifact?.exists ? 'success' : item.artifact?.external ? 'neutral' : 'warning',
+            children: item.artifact?.exists ? 'available' : item.artifact?.external ? 'external' : 'missing'
+          }), item.artifact?.href ? jsxRuntimeExports.jsx("a", {
+            href: item.artifact.href,
+            rel: "noreferrer",
+            target: "_blank",
+            children: "Open"
+          }) : null]
+        })]
+      }, item.label))
+    }), supporting.length ? jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Additional Sources"
+      }), jsxRuntimeExports.jsx("div", {
+        className: "detail-stack",
+        children: supporting.map(artifact => jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: [jsxRuntimeExports.jsxs("strong", {
+            children: [artifact.label, ":"]
+          }), " ", artifact.href ? jsxRuntimeExports.jsx("a", {
+            href: artifact.href,
+            rel: "noreferrer",
+            target: "_blank",
+            children: "Open"
+          }) : artifact.relative_path || artifact.target || 'Recorded']
+        }, `${artifact.kind}-${artifact.target}`))
+      })]
+    }) : null]
+  });
+}
+function ReviewManualHandoffPanel({
+  manualHandoffWatch
+}) {
+  const recentAnswers = manualHandoffWatch?.recent_answers || [];
+  const [showChanges, setShowChanges] = reactExports.useState(false);
+  return jsxRuntimeExports.jsxs("div", {
+    className: "detail-stack",
+    children: [jsxRuntimeExports.jsxs("div", {
+      className: "review-stat-strip",
+      children: [jsxRuntimeExports.jsxs("div", {
+        className: "review-stat-pill",
+        children: [jsxRuntimeExports.jsx("span", {
+          children: "Status"
+        }), jsxRuntimeExports.jsx("strong", {
+          children: manualHandoffWatch?.status || (manualHandoffWatch?.active ? 'watching' : 'idle')
+        })]
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "review-stat-pill",
+        children: [jsxRuntimeExports.jsx("span", {
+          children: "Last Sync"
+        }), jsxRuntimeExports.jsx("strong", {
+          children: manualHandoffWatch?.last_synced_at ? formatDate(manualHandoffWatch.last_synced_at) : '-'
+        })]
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "review-stat-pill",
+        children: [jsxRuntimeExports.jsx("span", {
+          children: "Learned"
+        }), jsxRuntimeExports.jsx("strong", {
+          children: formatNumber(manualHandoffWatch?.synced_question_count || 0)
+        })]
+      })]
+    }), jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Tracked Page"
+      }), manualHandoffWatch?.last_page_url ? jsxRuntimeExports.jsx("a", {
+        href: manualHandoffWatch.last_page_url,
+        rel: "noreferrer",
+        target: "_blank",
+        children: manualHandoffWatch.last_page_url
+      }) : jsxRuntimeExports.jsx("div", {
+        className: "detail-line",
+        children: "No parked browser page URL recorded yet."
+      })]
+    }), jsxRuntimeExports.jsx("div", {
+      className: "detail-line",
+      children: manualHandoffWatch?.active ? `The parked application is still being watched. ${formatNumber(manualHandoffWatch?.pending_count || 0)} text field${safeNumber(manualHandoffWatch?.pending_count) === 1 ? '' : 's'} are still settling.` : 'No active manual handoff session is being watched right now.'
+    }), recentAnswers.length ? jsxRuntimeExports.jsxs("div", {
+      className: "detail-stack",
+      children: [jsxRuntimeExports.jsx("button", {
+        className: "button button-ghost review-inline-toggle",
+        type: "button",
+        onClick: () => setShowChanges(current => !current),
+        children: showChanges ? 'Hide Learned Changes' : `Show Learned Changes (${formatNumber(recentAnswers.length)})`
+      }), showChanges ? jsxRuntimeExports.jsx("div", {
+        className: "table-wrap",
+        children: jsxRuntimeExports.jsxs("table", {
+          className: "data-table review-data-table handoff-change-table",
+          children: [jsxRuntimeExports.jsx("thead", {
+            children: jsxRuntimeExports.jsxs("tr", {
+              children: [jsxRuntimeExports.jsx("th", {
+                children: "Question"
+              }), jsxRuntimeExports.jsx("th", {
+                children: "Previous"
+              }), jsxRuntimeExports.jsx("th", {
+                children: "New"
+              }), jsxRuntimeExports.jsx("th", {
+                children: "Change Type"
+              })]
+            })
+          }), jsxRuntimeExports.jsx("tbody", {
+            children: recentAnswers.map((item, index) => jsxRuntimeExports.jsxs("tr", {
+              children: [jsxRuntimeExports.jsx("td", {
+                children: item.prompt_text || item.question_id || '-'
+              }), jsxRuntimeExports.jsx("td", {
+                children: item.previous_answer || '-'
+              }), jsxRuntimeExports.jsx("td", {
+                children: item.answer_text || '-'
+              }), jsxRuntimeExports.jsx("td", {
+                children: jsxRuntimeExports.jsx(Badge, {
+                  tone: item.filled_blank ? 'success' : 'warning',
+                  children: item.change_type || (item.filled_blank ? 'filled_blank' : 'corrected_answer')
+                })
+              })]
+            }, `${item.question_id || item.prompt_text}-${index}`))
+          })]
+        })
+      }) : null]
+    }) : null]
+  });
+}
+function ReviewAdvancedPanel({
+  detail
+}) {
+  const history = detail?.history || [];
+  const summary = detail?.summary || {};
+  const reportMarkdown = detail?.report_markdown || '';
+  return jsxRuntimeExports.jsxs("div", {
+    className: "detail-stack",
+    children: [jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Screening And Classification"
+      }), jsxRuntimeExports.jsxs("div", {
+        className: "detail-stack",
+        children: [jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Screening: ", summary.screening_status || detail?.job?.screening_status || '-']
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["ATS family: ", summary.classification?.ats_family || detail?.job?.ats_family || '-']
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Board family: ", summary.classification?.board_family || detail?.job?.board_family || '-']
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Automation tier: ", summary.classification?.automation_tier || detail?.job?.automation_tier || '-']
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Low confidence answers: ", formatNumber(summary.low_confidence_count || 0)]
+        }), jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Ungrounded answers: ", formatNumber(summary.ungrounded_count || 0)]
+        }), summary.hard_reject_reason ? jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Hard reject reason: ", summary.hard_reject_reason]
+        }) : null, summary.auth_reject_reason ? jsxRuntimeExports.jsxs("div", {
+          className: "detail-line",
+          children: ["Auth reject reason: ", summary.auth_reject_reason]
+        }) : null]
+      })]
+    }), history.length ? jsxRuntimeExports.jsx("div", {
+      className: "detail-stack",
+      children: history.map((entry, index) => jsxRuntimeExports.jsxs("article", {
+        className: "activity-item",
+        children: [jsxRuntimeExports.jsxs("div", {
+          className: "activity-meta",
+          children: [jsxRuntimeExports.jsx(Badge, {
+            tone: toneFor(entry.type || entry.summary),
+            children: entry.type || 'review.event'
+          }), jsxRuntimeExports.jsx("span", {
+            children: entry.actor || 'operator'
+          }), jsxRuntimeExports.jsx("span", {
+            children: entry.timestamp ? formatDate(entry.timestamp) : '-'
+          })]
+        }), jsxRuntimeExports.jsx("strong", {
+          children: entry.summary || 'Review event recorded.'
+        }), entry.metadata?.reason ? jsxRuntimeExports.jsxs("div", {
+          className: "cell-meta",
+          children: ["Note: ", entry.metadata.reason]
+        }) : null, entry.metadata?.updated_count ? jsxRuntimeExports.jsxs("div", {
+          className: "cell-meta",
+          children: ["Updated answers: ", entry.metadata.updated_count]
+        }) : null]
+      }, `${entry.timestamp || index}-${entry.type || index}`))
+    }) : jsxRuntimeExports.jsx("div", {
+      className: "subpanel",
+      children: jsxRuntimeExports.jsx("div", {
+        className: "detail-line",
+        children: "No review history recorded yet."
+      })
+    }), jsxRuntimeExports.jsxs("div", {
+      className: "subpanel",
+      children: [jsxRuntimeExports.jsx("div", {
+        className: "eyebrow",
+        children: "Report Output"
+      }), jsxRuntimeExports.jsx("pre", {
+        className: "report-block",
+        children: reportMarkdown || 'No report available.'
+      })]
     })]
   });
 }
 function ReviewPage({
-  operator,
   live
 }) {
   const review = usePolledJson('/api/review/queue', 7000);
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get('application_id') || '';
+  const activeSectionFromUrl = reviewSectionFromTab(searchParams.get('tab'));
   const detail = usePolledJson(selectedId ? `/api/applications/${selectedId}` : '/api/review/queue?limit=1', 7000);
   const [notice, setNotice] = reactExports.useState('');
   const [answers, setAnswers] = reactExports.useState({});
+  const [queueSearch, setQueueSearch] = reactExports.useState('');
+  const [queueFilter, setQueueFilter] = reactExports.useState('all');
+  const [confirmAction, setConfirmAction] = reactExports.useState('');
+  const [actionNote, setActionNote] = reactExports.useState('');
+  const [sectionOverrides, setSectionOverrides] = reactExports.useState({});
+  const searchInputRef = reactExports.useRef(null);
   const reviewItems = review.data?.items || [];
-  function selectApplication(applicationId) {
+  const manualHandoffWatch = detail.data?.manual_handoff_watch || detail.data?.submission?.result?.manual_handoff_watch || {};
+  const unresolvedQuestions = (detail.data?.questions || []).filter(question => question.needs_user_input);
+  const handoffRecentlyActive = Boolean(manualHandoffWatch?.active || manualHandoffWatch?.last_synced_at || (manualHandoffWatch?.recent_answers || []).length);
+  const sectionDefaults = reactExports.useMemo(() => ({
+    questions: activeSectionFromUrl === 'questions' || unresolvedQuestions.length > 0,
+    documents: activeSectionFromUrl === 'documents',
+    handoff: activeSectionFromUrl === 'handoff' || handoffRecentlyActive,
+    advanced: activeSectionFromUrl === 'advanced'
+  }), [activeSectionFromUrl, handoffRecentlyActive, unresolvedQuestions.length]);
+  const filteredItems = reactExports.useMemo(() => {
+    return [...reviewItems].filter(item => queueMatchesSearch(item, queueSearch)).filter(item => reviewQueueMatchesFilter(item, queueFilter)).sort(reviewSortComparator());
+  }, [queueFilter, queueSearch, reviewItems]);
+  const queueCounts = reactExports.useMemo(() => ({
+    all: reviewItems.length,
+    needs_input: reviewItems.filter(item => reviewQueueMatchesFilter(item, 'needs_input')).length,
+    manual_handoff: reviewItems.filter(item => reviewQueueMatchesFilter(item, 'manual_handoff')).length,
+    ready: reviewItems.filter(item => reviewQueueMatchesFilter(item, 'ready')).length
+  }), [reviewItems]);
+  function setReviewParam(key, value) {
     const nextParams = new URLSearchParams(searchParams);
-    if (applicationId) nextParams.set('application_id', applicationId);else nextParams.delete('application_id');
+    if (value) nextParams.set(key, value);else nextParams.delete(key);
     setSearchParams(nextParams, {
       replace: true
     });
   }
+  function selectApplication(applicationId) {
+    setReviewParam('application_id', applicationId);
+  }
+  function openConfirm(action) {
+    setConfirmAction(action);
+    setActionNote('');
+  }
+  function isSectionOpen(sectionKey) {
+    if (Object.prototype.hasOwnProperty.call(sectionOverrides, sectionKey)) return sectionOverrides[sectionKey];
+    return sectionDefaults[sectionKey] || false;
+  }
+  function toggleSection(sectionKey) {
+    const nextOpen = !isSectionOpen(sectionKey);
+    setSectionOverrides(current => ({
+      ...current,
+      [sectionKey]: nextOpen
+    }));
+    if (nextOpen) {
+      const tab = reviewTabForSection(sectionKey);
+      setReviewParam('tab', tab === 'summary' ? '' : tab);
+      return;
+    }
+    if (activeSectionFromUrl === sectionKey) {
+      setReviewParam('tab', '');
+    }
+  }
   reactExports.useEffect(() => {
     if (!review.data) return;
-    const queueIds = reviewItems.map(item => item.application_id);
+    const queueIds = filteredItems.map(item => item.application_id);
     if (!queueIds.length) {
       if (selectedId) selectApplication('');
       return;
     }
     if (!selectedId || !queueIds.includes(selectedId)) {
-      selectApplication(reviewItems[0].application_id);
+      selectApplication(queueIds[0]);
     }
-  }, [reviewItems, searchParams, selectedId, setSearchParams]);
-  async function takeAction(action) {
+  }, [filteredItems, selectedId, review.data]);
+  reactExports.useEffect(() => {
+    setSectionOverrides({});
+  }, [selectedId]);
+  reactExports.useEffect(() => {
+    const onKeyDown = event => {
+      if (isEditableShortcutTarget(event.target)) return;
+      if (!filteredItems.length) return;
+      const currentIndex = Math.max(0, filteredItems.findIndex(item => item.application_id === selectedId));
+      if (event.key === '/') {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+      if (event.key === 'j') {
+        event.preventDefault();
+        selectApplication(filteredItems[Math.min(currentIndex + 1, filteredItems.length - 1)]?.application_id || filteredItems[0].application_id);
+        return;
+      }
+      if (event.key === 'k') {
+        event.preventDefault();
+        selectApplication(filteredItems[Math.max(currentIndex - 1, 0)]?.application_id || filteredItems[0].application_id);
+        return;
+      }
+      if (!selectedId) return;
+      if (event.key === 'a') void takeAction('approve');
+      if (event.key === 'o') void takeAction('request_input');
+      if (event.key === 's') void takeAction('sync_manual_input');
+      if (event.key === 'm') openConfirm('mark_submitted');
+      if (event.key === 'r') openConfirm('reject');
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [filteredItems, selectedId]);
+  async function takeAction(action, reason = '') {
     if (!selectedId) return;
     try {
       const result = await requestJson('/api/review/action', {
         method: 'POST',
         body: JSON.stringify({
           application_id: selectedId,
-          action
+          action,
+          reason: reason || undefined
         }),
         timeoutMs: 120_000
       });
-      if (result?.manual_submitted) {
+      if (action === 'sync_manual_input') {
+        if (!result?.page_found) {
+          setNotice('Could not find an open parked application tab to sync yet. Open the manual handoff page first, then retry.');
+        } else if (result?.synced_count) {
+          const filledBlankCount = Number(result?.filled_blank_count || 0);
+          const correctedAnswerCount = Number(result?.corrected_answer_count || 0);
+          setNotice(`Synced ${result.synced_count} browser answer${result.synced_count === 1 ? '' : 's'}. ${filledBlankCount} filled blank field${filledBlankCount === 1 ? '' : 's'}, ${correctedAnswerCount} corrected existing answer${correctedAnswerCount === 1 ? '' : 's'}.`);
+        } else {
+          setNotice('Checked the parked application page. There are no new manual answers to save yet.');
+        }
+      } else if (result?.manual_submitted) {
         setNotice('Marked this application as submitted. It now counts toward submitted totals and leaves the review queue.');
+      } else if (action === 'reject') {
+        setNotice('Rejected this application and removed it from the active review queue.');
       } else if (result?.manual_handoff_opened && action === 'request_input') {
         setNotice('Opened the partially filled application for manual completion. No submit attempt was made.');
       } else if (result?.manual_handoff_opened) {
@@ -41377,8 +42127,10 @@ function ReviewPage({
       } else if (result?.blocked) {
         setNotice('Submission is still blocked. The page could not be kept open automatically, so answer the saved blockers here and retry.');
       } else {
-        setNotice(`Review action applied: ${action}`);
+        setNotice(`Review action applied: ${reviewActionLabel(action)}`);
       }
+      setConfirmAction('');
+      setActionNote('');
       const refreshedQueue = await review.refresh();
       const refreshedItems = refreshedQueue?.items || [];
       const selectedStillPresent = refreshedItems.some(item => item.application_id === selectedId);
@@ -41426,43 +42178,63 @@ function ReviewPage({
   }
   return jsxRuntimeExports.jsxs("div", {
     className: "page-grid review-grid",
-    children: [jsxRuntimeExports.jsxs(Section, {
+    children: [jsxRuntimeExports.jsx(Section, {
       eyebrow: "Review Queue",
-      title: "Applications Needing Oversight",
-      description: "Preview failures, unresolved blockers, and manual approval flow.",
-      children: [jsxRuntimeExports.jsx(CurrentProcessPanel, {
-        operator: operator,
-        compact: true
-      }), jsxRuntimeExports.jsx(DataState, {
+      title: "Applications To Review",
+      description: "A compact inbox for the applications that still need your attention.",
+      children: jsxRuntimeExports.jsx(DataState, {
         error: review.error,
         loading: review.loading,
         empty: !reviewItems.length,
         emptyLabel: "No review items.",
         emptyDetail: "Discovery and drafting must create application records before review can begin.",
-        children: jsxRuntimeExports.jsx("div", {
-          className: "review-list",
-          children: reviewItems.map(item => jsxRuntimeExports.jsxs("button", {
-            className: `review-row ${selectedId === item.application_id ? 'selected' : ''}`,
-            type: "button",
-            onClick: () => selectApplication(item.application_id),
-            children: [jsxRuntimeExports.jsxs("div", {
-              children: [jsxRuntimeExports.jsx("strong", {
-                children: item.company
-              }), jsxRuntimeExports.jsx("div", {
-                className: "cell-meta",
-                children: item.title
+        children: jsxRuntimeExports.jsxs("div", {
+          className: "section-stack",
+          children: [jsxRuntimeExports.jsxs("div", {
+            className: "review-queue-controls",
+            children: [jsxRuntimeExports.jsxs("label", {
+              className: "review-search",
+              children: [jsxRuntimeExports.jsx("span", {
+                children: "Search"
+              }), jsxRuntimeExports.jsx("input", {
+                ref: searchInputRef,
+                value: queueSearch,
+                onChange: event => setQueueSearch(event.target.value),
+                placeholder: "Search company, role, blocker, or next step"
               })]
-            }), jsxRuntimeExports.jsx(Badge, {
-              tone: toneFor(item.review_status || item.status),
-              children: item.review_status || item.status
+            }), jsxRuntimeExports.jsx("div", {
+              className: "review-filter-row",
+              "aria-label": "Review queue filters",
+              children: REVIEW_QUEUE_FILTERS.map(item => jsxRuntimeExports.jsxs("button", {
+                className: `review-filter-pill ${queueFilter === item.key ? 'active' : ''}`.trim(),
+                type: "button",
+                onClick: () => setQueueFilter(item.key),
+                children: [item.label, " ", jsxRuntimeExports.jsx("span", {
+                  children: formatNumber(queueCounts[item.key] || 0)
+                })]
+              }, item.key))
             })]
-          }, item.application_id))
+          }), jsxRuntimeExports.jsxs("div", {
+            className: "cell-meta",
+            children: ["Showing ", formatNumber(filteredItems.length), " of ", formatNumber(reviewItems.length), " applications."]
+          }), jsxRuntimeExports.jsx(DataState, {
+            error: "",
+            loading: false,
+            empty: !filteredItems.length,
+            emptyLabel: "No filtered review items.",
+            emptyDetail: "Adjust the search or queue filters to show more applications.",
+            children: jsxRuntimeExports.jsx(ReviewQueueInbox, {
+              items: filteredItems,
+              selectedId: selectedId,
+              onSelect: selectApplication
+            })
+          })]
         })
-      })]
+      })
     }), jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Application Detail",
+      eyebrow: "Review Workspace",
       title: "Selected Application",
-      description: "Review status, blockers, questions, and report output.",
+      description: "A focused workspace for clearing blockers, finishing handoffs, and moving the application forward.",
       children: jsxRuntimeExports.jsxs(DataState, {
         error: detail.error,
         loading: detail.loading,
@@ -41473,206 +42245,138 @@ function ReviewPage({
           message: notice,
           tone: toneFor(notice)
         }), jsxRuntimeExports.jsxs("div", {
-          className: "detail-stack",
+          className: "review-detail-shell",
           children: [jsxRuntimeExports.jsxs("div", {
-            className: "detail-line",
-            children: [jsxRuntimeExports.jsx("strong", {
-              children: detail.data?.application?.company
-            }), " / ", detail.data?.application?.role]
-          }), jsxRuntimeExports.jsxs("div", {
-            className: "tag-row",
-            children: [jsxRuntimeExports.jsx(Badge, {
-              tone: toneFor(detail.data?.application?.status),
-              children: detail.data?.application?.status || '-'
-            }), jsxRuntimeExports.jsx(Badge, {
-              tone: toneFor(detail.data?.submission?.status),
-              children: detail.data?.submission?.status || 'not_prepared'
-            }), jsxRuntimeExports.jsx(Badge, {
-              tone: "neutral",
-              children: detail.data?.application?.source || '-'
+            className: "review-detail-header review-summary-card",
+            children: [jsxRuntimeExports.jsxs("div", {
+              className: "review-detail-title",
+              children: [jsxRuntimeExports.jsx("div", {
+                className: "eyebrow",
+                children: "Application Summary"
+              }), jsxRuntimeExports.jsxs("h3", {
+                children: [detail.data?.application?.company, " / ", detail.data?.application?.role]
+              }), jsxRuntimeExports.jsx("p", {
+                className: "section-copy",
+                children: detail.data?.summary?.next_action_reason || 'Review the open questions and decide whether to continue, hand off, or apply.'
+              })]
+            }), jsxRuntimeExports.jsxs("div", {
+              className: "review-header-metrics",
+              children: [jsxRuntimeExports.jsxs("div", {
+                className: "review-header-line",
+                children: [jsxRuntimeExports.jsx(Badge, {
+                  tone: toneFor(detail.data?.summary?.severity || detail.data?.application?.status),
+                  children: detail.data?.application?.status || '-'
+                }), jsxRuntimeExports.jsx(Badge, {
+                  tone: toneFor(detail.data?.submission?.status),
+                  children: detail.data?.submission?.status || 'not_prepared'
+                }), reviewSourceMeta(detail.data) ? jsxRuntimeExports.jsx(Badge, {
+                  tone: "neutral",
+                  children: reviewSourceMeta(detail.data)
+                }) : null]
+              }), detail.data?.application?.score != null || detail.data?.application?.grade ? jsxRuntimeExports.jsx("div", {
+                className: "cell-meta",
+                children: [detail.data?.application?.score != null ? `Score ${detail.data.application.score}` : '', detail.data?.application?.grade ? `Grade ${detail.data.application.grade}` : ''].filter(Boolean).join(' / ')
+              }) : null]
+            }), jsxRuntimeExports.jsxs("div", {
+              className: "review-action-bar",
+              children: [jsxRuntimeExports.jsx("button", {
+                className: "button button-primary",
+                type: "button",
+                onClick: () => takeAction('approve'),
+                children: "Approve / Apply"
+              }), jsxRuntimeExports.jsx("button", {
+                className: "button button-ghost",
+                type: "button",
+                onClick: () => takeAction('request_input'),
+                children: "Open For Manual Input"
+              }), jsxRuntimeExports.jsx("button", {
+                className: "button button-ghost",
+                type: "button",
+                onClick: () => takeAction('sync_manual_input'),
+                children: "Sync Browser Changes"
+              }), jsxRuntimeExports.jsx(ReviewMoreMenu, {
+                onSelectAction: openConfirm
+              })]
+            }), confirmAction ? jsxRuntimeExports.jsxs("div", {
+              className: "review-confirm-panel",
+              children: [jsxRuntimeExports.jsx("div", {
+                className: "eyebrow",
+                children: reviewActionLabel(confirmAction)
+              }), jsxRuntimeExports.jsx("textarea", {
+                rows: "3",
+                value: actionNote,
+                onChange: event => setActionNote(event.target.value),
+                placeholder: confirmAction === 'mark_submitted' ? 'Optional note about how you submitted it manually' : 'Optional note about why this application is being rejected'
+              }), jsxRuntimeExports.jsxs("div", {
+                className: "action-row",
+                children: [jsxRuntimeExports.jsx("button", {
+                  className: "button button-primary",
+                  type: "button",
+                  onClick: () => takeAction(confirmAction, actionNote),
+                  children: confirmAction === 'mark_submitted' ? 'Confirm Manual Submission' : 'Confirm Reject'
+                }), jsxRuntimeExports.jsx("button", {
+                  className: "button button-ghost",
+                  type: "button",
+                  onClick: () => {
+                    setConfirmAction('');
+                    setActionNote('');
+                  },
+                  children: "Cancel"
+                })]
+              })]
+            }) : null, jsxRuntimeExports.jsx("div", {
+              className: "cell-meta",
+              children: "Use manual input when the form is mostly filled and just needs your help. Sync afterward to save what you entered for reuse."
             })]
-          }), jsxRuntimeExports.jsxs("div", {
-            className: "action-row",
-            children: [jsxRuntimeExports.jsx("button", {
-              className: "button button-primary",
-              type: "button",
-              onClick: () => takeAction('approve'),
-              children: "Approve / Apply"
-            }), jsxRuntimeExports.jsx("button", {
-              className: "button button-ghost",
-              type: "button",
-              onClick: () => takeAction('request_input'),
-              children: "Open For Manual Input"
-            }), jsxRuntimeExports.jsx("button", {
-              className: "button button-ghost",
-              type: "button",
-              onClick: () => takeAction('mark_submitted'),
-              children: "Mark As Submitted"
-            }), jsxRuntimeExports.jsx("button", {
-              className: "button button-ghost",
-              type: "button",
-              onClick: () => takeAction('reject'),
-              children: "Reject"
-            })]
-          }), jsxRuntimeExports.jsx("div", {
-            className: "cell-meta",
-            children: "Approve / Apply only submits when no blockers remain. Open For Manual Input always opens a partial form for you to finish without submitting. Mark As Submitted records a manual submission you already completed yourself."
-          }), jsxRuntimeExports.jsxs("div", {
-            className: "subpanel",
-            children: [jsxRuntimeExports.jsx("div", {
-              className: "eyebrow",
-              children: "Blockers"
-            }), (detail.data?.blockers || []).length ? jsxRuntimeExports.jsx("div", {
-              className: "detail-stack",
-              children: (detail.data?.blockers || []).map((blocker, index) => jsxRuntimeExports.jsx("div", {
-                className: "detail-line",
-                children: blockerLabel(blocker)
-              }, `${blockerLabel(blocker)}-${index}`))
-            }) : jsxRuntimeExports.jsx("div", {
-              className: "detail-line",
-              children: "No blockers recorded."
-            })]
-          }), jsxRuntimeExports.jsxs("div", {
-            className: "subpanel",
-            children: [jsxRuntimeExports.jsx("div", {
-              className: "eyebrow",
-              children: "Questions"
-            }), (detail.data?.questions || []).length ? jsxRuntimeExports.jsxs("div", {
-              className: "detail-stack",
-              children: [(detail.data?.questions || []).filter(question => question.needs_user_input).map(question => {
-                const key = `${selectedId}::${question.question_id}`;
-                const options = questionOptions(question);
-                const value = Object.prototype.hasOwnProperty.call(answers, key) ? answers[key] : hydrateAnswerDraft(question, question.existing_answer ?? '');
-                const isCheckboxGroup = question.widget_type === 'checkbox_group' && options.length > 0;
-                const isSelect = options.length > 0 && !isCheckboxGroup;
-                const selectedValues = Array.isArray(value) ? value : [];
-                return jsxRuntimeExports.jsxs("div", {
-                  className: "question-card",
-                  children: [jsxRuntimeExports.jsx("strong", {
-                    children: question.prompt_text
-                  }), jsxRuntimeExports.jsxs("div", {
-                    className: "answer-row",
-                    children: [isCheckboxGroup ? jsxRuntimeExports.jsx("div", {
-                      className: "detail-stack",
-                      children: options.map(option => jsxRuntimeExports.jsxs("label", {
-                        children: [jsxRuntimeExports.jsx("input", {
-                          checked: selectedValues.includes(option.label),
-                          onChange: event => setAnswers(current => {
-                            const base = Object.prototype.hasOwnProperty.call(current, key) ? current[key] : selectedValues;
-                            const selected = Array.isArray(base) ? [...base] : [];
-                            return {
-                              ...current,
-                              [key]: event.target.checked ? dedupeStrings([...selected, option.label]) : selected.filter(entry => entry !== option.label)
-                            };
-                          }),
-                          type: "checkbox"
-                        }), " ", option.label]
-                      }, `${question.question_id}-${option.label}`))
-                    }) : isSelect ? jsxRuntimeExports.jsxs("select", {
-                      value: String(value ?? ''),
-                      onChange: event => setAnswers(current => ({
-                        ...current,
-                        [key]: event.target.value
-                      })),
-                      children: [jsxRuntimeExports.jsx("option", {
-                        value: "",
-                        children: "Select answer"
-                      }), options.map(option => jsxRuntimeExports.jsx("option", {
-                        value: option.label,
-                        children: option.label
-                      }, `${question.question_id}-${option.value}-${option.label}`))]
-                    }) : jsxRuntimeExports.jsx("input", {
-                      value: String(value ?? ''),
-                      onChange: event => setAnswers(current => ({
-                        ...current,
-                        [key]: event.target.value
-                      })),
-                      placeholder: "Type answer"
-                    }), jsxRuntimeExports.jsx("button", {
-                      className: "button button-primary",
-                      type: "button",
-                      onClick: () => submitReviewAnswer(question),
-                      children: "Save Answer"
-                    })]
-                  }), jsxRuntimeExports.jsx("div", {
-                    className: "cell-meta",
-                    children: "Saved answers are reused automatically the next time this prompt appears."
-                  })]
-                }, question.question_id);
-              }), !(detail.data?.questions || []).some(question => question.needs_user_input) ? jsxRuntimeExports.jsx("div", {
-                className: "detail-line",
-                children: "No unresolved questions."
-              }) : null, (detail.data?.questions || []).filter(question => !question.needs_user_input).map(question => jsxRuntimeExports.jsxs("div", {
-                className: "detail-line",
-                children: [question.prompt_text, question.existing_answer ? `: ${question.existing_answer}` : '']
-              }, question.question_id))]
-            }) : jsxRuntimeExports.jsx("div", {
-              className: "detail-line",
-              children: "No questions captured."
-            })]
-          }), jsxRuntimeExports.jsxs("div", {
-            className: "subpanel",
-            children: [jsxRuntimeExports.jsx("div", {
-              className: "eyebrow",
-              children: "Report"
-            }), jsxRuntimeExports.jsx("pre", {
-              className: "report-block",
-              children: detail.data?.report_markdown || 'No report available.'
-            })]
+          }), jsxRuntimeExports.jsx(ReviewNeedsAttentionPanel, {
+            detail: detail.data
+          }), jsxRuntimeExports.jsx(ReviewDisclosure, {
+            title: "Questions",
+            summary: unresolvedQuestions.length ? `${formatNumber(unresolvedQuestions.length)} answer${unresolvedQuestions.length === 1 ? '' : 's'} still need your input.` : 'Review saved answers or add anything still missing.',
+            open: isSectionOpen('questions'),
+            onToggle: () => toggleSection('questions'),
+            children: jsxRuntimeExports.jsx(ReviewQuestionsPanel, {
+              questions: detail.data?.questions || [],
+              selectedId: selectedId,
+              answers: answers,
+              setAnswers: setAnswers,
+              onSave: submitReviewAnswer
+            })
+          }), jsxRuntimeExports.jsx(ReviewDisclosure, {
+            title: "Documents & Links",
+            summary: "Open the generated documents, evaluation report, and the original job posting.",
+            open: isSectionOpen('documents'),
+            onToggle: () => toggleSection('documents'),
+            children: jsxRuntimeExports.jsx(ReviewDocumentsPanel, {
+              detail: detail.data
+            })
+          }), jsxRuntimeExports.jsx(ReviewDisclosure, {
+            title: "Manual Handoff",
+            summary: handoffRecentlyActive ? 'A manual handoff is active or was recently synced.' : 'Only open this when you need manual takeover details.',
+            open: isSectionOpen('handoff'),
+            onToggle: () => toggleSection('handoff'),
+            children: jsxRuntimeExports.jsx(ReviewManualHandoffPanel, {
+              manualHandoffWatch: manualHandoffWatch
+            })
+          }), jsxRuntimeExports.jsx(ReviewDisclosure, {
+            title: "Advanced",
+            summary: "History, diagnostics, and lower-level review context.",
+            open: isSectionOpen('advanced'),
+            onToggle: () => toggleSection('advanced'),
+            children: jsxRuntimeExports.jsx(ReviewAdvancedPanel, {
+              detail: detail.data
+            })
           })]
         })]
       })
     })]
   });
 }
-function RunsPage() {
-  const runs = usePolledJson('/api/runs/history', 9000);
-  const runItems = runs.data?.items || [];
-  return jsxRuntimeExports.jsx("div", {
-    className: "page-stack",
-    children: jsxRuntimeExports.jsx(Section, {
-      eyebrow: "Runs",
-      title: "Operational History",
-      description: "Recent discover, daily, and autonomous runs with compact metrics.",
-      children: jsxRuntimeExports.jsx(DataState, {
-        error: runs.error,
-        loading: runs.loading,
-        empty: !runItems.length,
-        emptyLabel: "No runs recorded yet.",
-        children: jsxRuntimeExports.jsx("div", {
-          className: "runs-list",
-          children: runItems.map(run => jsxRuntimeExports.jsxs("article", {
-            className: "finding-card",
-            children: [jsxRuntimeExports.jsxs("div", {
-              className: "activity-meta",
-              children: [jsxRuntimeExports.jsx(Badge, {
-                tone: toneFor(run.status),
-                children: run.status
-              }), jsxRuntimeExports.jsx("span", {
-                children: run.run_type
-              }), jsxRuntimeExports.jsx("span", {
-                children: formatDate(run.completed_at || run.started_at)
-              })]
-            }), jsxRuntimeExports.jsx("strong", {
-              children: run.run_id
-            }), jsxRuntimeExports.jsxs("div", {
-              className: "detail-line",
-              children: ["submitted ", (run.submitted_count ?? run.submitted_application_ids?.length) || 0, " / failed ", (run.failed_count ?? run.failed_application_ids?.length) || 0]
-            }), jsxRuntimeExports.jsxs("div", {
-              className: "detail-line",
-              children: ["processed ", (run.processed_count ?? run.processed_job_ids?.length) || 0, " / evaluated ", (run.evaluated_count ?? run.evaluated_application_ids?.length) || 0]
-            })]
-          }, run.run_id))
-        })
-      })
-    })
-  });
-}
 function Layout({
-  operator,
   children
 }) {
   const location = useLocation();
+  const activePath = navPathForLocation(location.pathname);
   return jsxRuntimeExports.jsxs("div", {
     className: "app-shell",
     children: [jsxRuntimeExports.jsxs("header", {
@@ -41687,13 +42391,11 @@ function Layout({
       }), jsxRuntimeExports.jsx("nav", {
         className: "topnav",
         children: NAV_ITEMS.map(item => jsxRuntimeExports.jsx(Link, {
-          className: location.pathname === item.to ? 'active' : '',
+          className: activePath === item.to ? 'active' : '',
           to: item.to,
           children: item.label
         }, item.to))
       })]
-    }), jsxRuntimeExports.jsx(OperatorRail, {
-      operator: operator
     }), jsxRuntimeExports.jsx("main", {
       className: "page-shell",
       children: children
@@ -41704,7 +42406,6 @@ function App() {
   const live = useLiveConsole();
   const operator = reactExports.useMemo(() => deriveOperatorState(live.snapshot, live.connection, live.lastSnapshotAt), [live.connection, live.lastSnapshotAt, live.snapshot]);
   return jsxRuntimeExports.jsx(Layout, {
-    operator: operator,
     children: jsxRuntimeExports.jsxs(Routes, {
       children: [jsxRuntimeExports.jsx(Route, {
         path: "/",
@@ -41714,7 +42415,10 @@ function App() {
         })
       }), jsxRuntimeExports.jsx(Route, {
         path: "/setup",
-        element: jsxRuntimeExports.jsx(SetupPage, {})
+        element: jsxRuntimeExports.jsx(Navigate, {
+          to: "/settings",
+          replace: true
+        })
       }), jsxRuntimeExports.jsx(Route, {
         path: "/settings",
         element: jsxRuntimeExports.jsx(SettingsPage, {})
@@ -41738,10 +42442,16 @@ function App() {
         })
       }), jsxRuntimeExports.jsx(Route, {
         path: "/runs",
-        element: jsxRuntimeExports.jsx(RunsPage, {})
+        element: jsxRuntimeExports.jsx(Navigate, {
+          to: "/",
+          replace: true
+        })
       }), jsxRuntimeExports.jsx(Route, {
         path: "/training",
-        element: jsxRuntimeExports.jsx(RunsPage, {})
+        element: jsxRuntimeExports.jsx(Navigate, {
+          to: "/",
+          replace: true
+        })
       })]
     })
   });

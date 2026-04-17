@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BrowserRouter } from 'react-router-dom'
 
-import { AutopilotPage, DashboardPage, ReviewPage, RunsPage, SettingsPage, SetupPage, deriveOperatorState } from './app.jsx'
+import { App, AutopilotPage, DashboardPage, ReviewPage, RunsPage, SettingsPage, SetupPage, deriveOperatorState } from './app.jsx'
 
 
 function buildOperator() {
@@ -203,9 +203,9 @@ describe('console pages', () => {
     vi.restoreAllMocks()
   })
 
-  it('dashboard actions call backend APIs and refresh state', async () => {
-    const live = { refresh: vi.fn().mockResolvedValue({}) }
-    const { calls } = installFetchMock(async ({ url, method }) => {
+  it('dashboard stays read-first and surfaces recent runs without execution controls', async () => {
+    const live = { error: '', refresh: vi.fn().mockResolvedValue({}) }
+    installFetchMock(async ({ url, method }) => {
       if (url === '/api/dashboard') {
         return {
           snapshot: { counts: { inbox: 2, applications: 1 } },
@@ -217,32 +217,43 @@ describe('console pages', () => {
           },
         }
       }
-      if (url === '/api/discover' && method === 'POST') return { started: true }
-      if (url === '/api/autonomous/run' && method === 'POST') return { started: true, run_id: 'auto-1' }
-      if (url === '/api/review/action' && method === 'POST') return { blocked: false }
-      if (url === '/api/workspace/reset-operational' && method === 'POST') return { deleted: { applications: 1, jobs: 2, runs: 3 } }
+      if (url === '/api/runs/history') {
+        return {
+          items: [
+            {
+              run_id: 'run-001',
+              run_type: 'autonomous',
+              status: 'completed',
+              started_at: '2026-04-13T12:00:00Z',
+              completed_at: '2026-04-13T12:15:00Z',
+              submitted_count: 2,
+              failed_count: 1,
+              processed_count: 8,
+              evaluated_count: 5,
+            },
+          ],
+        }
+      }
       return null
     })
 
-    render(<DashboardPage operator={buildOperator()} live={live} />)
+    renderWithRouter(<DashboardPage operator={buildOperator()} live={live} />)
 
-    await screen.findByText('Jobs And Application State')
-    fireEvent.click(screen.getByRole('button', { name: 'Discover Jobs' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Full Run' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reset Operational Data' }))
-
-    await waitFor(() => {
-      expect(calls.some((call) => call.url === '/api/discover' && call.method === 'POST')).toBe(true)
-      expect(calls.some((call) => call.url === '/api/autonomous/run' && call.method === 'POST')).toBe(true)
-      expect(calls.some((call) => call.url === '/api/review/action' && call.method === 'POST')).toBe(true)
-      expect(calls.some((call) => call.url === '/api/workspace/reset-operational' && call.method === 'POST')).toBe(true)
-    })
-    expect(live.refresh).toHaveBeenCalledTimes(4)
+    await screen.findByText('Overview And Health')
+    expect(screen.getByRole('link', { name: 'Open Autopilot' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Open Review' })).toBeTruthy()
+    expect(screen.getByText('run-001')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Discover Jobs' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Full Run' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Apply' })).toBeNull()
   })
 
-  it('setup page loads readiness and resets operational state', async () => {
+  it('setup compatibility view lands on settings readiness and resets operational state', async () => {
     const { calls } = installFetchMock(async ({ url, method }) => {
+      if (url === '/api/settings') return createSettingsPayload()
+      if (url.startsWith('/api/settings/models/available')) {
+        return { models: [{ id: 'runtime-qwen', label: 'runtime-qwen' }], count: 1, source: 'lmstudio', note: '1 models available from lmstudio.' }
+      }
       if (url === '/api/setup/readiness') {
         return {
           overall_status: 'pass',
@@ -270,7 +281,7 @@ describe('console pages', () => {
 
     render(<SetupPage />)
 
-    await screen.findByText('Workspace And Launch Checks')
+    await screen.findByText('Workspace Readiness')
     await screen.findByText('Profile Mode')
     await screen.findByText('.fmj/local-overrides/filefirst/user-profile.yml')
     fireEvent.click(screen.getByRole('button', { name: 'Reset Operational Data' }))
@@ -300,7 +311,7 @@ describe('console pages', () => {
 
     render(<SettingsPage />)
 
-    await screen.findByText('Control Center')
+    await screen.findByText('Configuration')
     expect(screen.getByDisplayValue('greenhouse')).toBeTruthy()
 
     const greenhouseCard = screen.getByText('Greenhouse').closest('article')
@@ -366,7 +377,7 @@ describe('console pages', () => {
 
     render(<SettingsPage />)
 
-    await screen.findByText('Control Center')
+    await screen.findByText('Configuration')
     fireEvent.click(screen.getByRole('button', { name: 'Ping Runtime' }))
 
     await waitFor(() => {
@@ -424,7 +435,7 @@ describe('console pages', () => {
 
     render(<AutopilotPage operator={buildOperator()} live={live} />)
 
-    await screen.findByText('Queue And Live Activity')
+    await screen.findByText('Execution Workspace')
     fireEvent.click(screen.getByRole('button', { name: 'Discover Jobs' }))
     fireEvent.click(screen.getByRole('button', { name: 'Full Run' }))
     fireEvent.click(screen.getByRole('button', { name: 'Reset Operational Data' }))
@@ -484,15 +495,18 @@ describe('console pages', () => {
     await screen.findByText('Selected Application')
     const detailSection = screen.getByText('Selected Application').closest('section')
     await waitFor(() => {
-      expect(within(detailSection).getByText('Bravo')).toBeTruthy()
+      expect(within(detailSection).getByRole('heading', { name: /Bravo/i })).toBeTruthy()
     })
     expect(window.location.search).toBe('?application_id=002')
+    expect(screen.queryByText('Current Process')).toBeNull()
+    expect(screen.queryByText(/Shortcuts:/)).toBeNull()
+    expect(screen.queryByRole('tab')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve / Apply' }))
 
     await waitFor(() => {
       expect(window.location.search).toBe('?application_id=001')
-      expect(within(detailSection).getByText('Acme')).toBeTruthy()
+      expect(within(detailSection).getByRole('heading', { name: /Acme/i })).toBeTruthy()
     })
     expect(live.refresh).toHaveBeenCalled()
   })
@@ -528,7 +542,10 @@ describe('console pages', () => {
     renderWithRouter(<ReviewPage operator={buildOperator()} live={live} />, '/review?application_id=001')
 
     await screen.findByText('Selected Application')
+    fireEvent.click(screen.getByRole('button', { name: 'More' }))
     fireEvent.click(screen.getByRole('button', { name: 'Mark As Submitted' }))
+    fireEvent.change(screen.getByPlaceholderText('Optional note about how you submitted it manually'), { target: { value: 'Submitted manually from the ATS.' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Manual Submission' }))
 
     await waitFor(() => {
       expect(screen.getByText('Marked this application as submitted. It now counts toward submitted totals and leaves the review queue.')).toBeTruthy()
@@ -536,6 +553,7 @@ describe('console pages', () => {
 
     const reviewCall = calls.find((call) => call.url === '/api/review/action' && call.method === 'POST')
     expect(JSON.parse(reviewCall.body).action).toBe('mark_submitted')
+    expect(JSON.parse(reviewCall.body).reason).toBe('Submitted manually from the ATS.')
     expect(live.refresh).toHaveBeenCalled()
   })
 
@@ -577,8 +595,10 @@ describe('console pages', () => {
     renderWithRouter(<ReviewPage operator={buildOperator()} live={live} />, '/review?application_id=001')
 
     await screen.findByText('Selected Application')
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'Yes' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save Answer' }))
+    const questionCard = (await screen.findAllByText('Certification')).find((node) => node.closest('.question-card'))
+    const questionPanel = questionCard.closest('.question-card')
+    fireEvent.change(within(questionPanel).getByRole('combobox'), { target: { value: 'Yes' } })
+    fireEvent.click(within(questionPanel).getByRole('button', { name: 'Save Answer' }))
 
     await waitFor(() => {
       expect(calls.some((call) => call.url === '/api/questions/answer' && call.method === 'POST')).toBe(true)
@@ -591,6 +611,52 @@ describe('console pages', () => {
     await waitFor(() => {
       expect(screen.getByText('Opened the partially filled application for manual completion. No submit attempt was made.')).toBeTruthy()
     })
+  })
+
+  it('review page can sync browser changes from a parked manual handoff', async () => {
+    const live = { refresh: vi.fn().mockResolvedValue({}) }
+    const calls = []
+    installFetchMock(async ({ url, method, body }) => {
+      calls.push({ url, method, body })
+      if (url === '/api/review/queue') {
+        return {
+          items: [
+            { application_id: '001', company: 'Acme', title: 'Backend Engineer', status: 'needs_user_input', review_status: 'needs_user_input' },
+          ],
+        }
+      }
+      if (url === '/api/applications/001') {
+        return {
+          application: { application_id: '001', company: 'Acme', role: 'Backend Engineer', status: 'Needs Input', source: 'greenhouse' },
+          submission: { status: 'needs_user_input', result: { manual_handoff_watch: { active: true, status: 'watching', synced_question_count: 0, filled_blank_count: 0, corrected_answer_count: 0, recent_answers: [] } } },
+          manual_handoff_watch: { active: true, status: 'watching', synced_question_count: 0, filled_blank_count: 0, corrected_answer_count: 0, recent_answers: [] },
+          blockers: [{ category: 'missing_required_field', label: 'Certification' }],
+          questions: [],
+          report_markdown: '# Acme',
+        }
+      }
+      if (url === '/api/review/action' && method === 'POST') {
+        const payload = JSON.parse(body)
+        if (payload.action === 'sync_manual_input') {
+          return { page_found: true, synced_count: 2, filled_blank_count: 1, corrected_answer_count: 1, blocked: false, remaining_blockers: [] }
+        }
+        return { blocked: false }
+      }
+      return null
+    })
+
+    renderWithRouter(<ReviewPage operator={buildOperator()} live={live} />, '/review?application_id=001')
+
+    await screen.findByText('Selected Application')
+    fireEvent.click(screen.getByRole('button', { name: 'Sync Browser Changes' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Synced 2 browser answers. 1 filled blank field, 1 corrected existing answer.')).toBeTruthy()
+    })
+
+    const syncCall = calls.find((call) => call.url === '/api/review/action' && call.method === 'POST' && JSON.parse(call.body).action === 'sync_manual_input')
+    expect(syncCall).toBeTruthy()
+    expect(live.refresh).toHaveBeenCalled()
   })
 
   it('review page serializes checkbox-group answers for reuse', async () => {
@@ -630,9 +696,11 @@ describe('console pages', () => {
     renderWithRouter(<ReviewPage operator={buildOperator()} live={live} />, '/review?application_id=003')
 
     await screen.findByText('Selected Application')
-    fireEvent.click(screen.getByLabelText('Remote'))
-    fireEvent.click(screen.getByLabelText('New York'))
-    fireEvent.click(screen.getByRole('button', { name: 'Save Answer' }))
+    const locationsCard = (await screen.findAllByText('Preferred work locations')).find((node) => node.closest('.question-card'))
+    const questionPanel = locationsCard.closest('.question-card')
+    fireEvent.click(within(questionPanel).getByLabelText('Remote'))
+    fireEvent.click(within(questionPanel).getByLabelText('New York'))
+    fireEvent.click(within(questionPanel).getByRole('button', { name: 'Save Answer' }))
 
     await waitFor(() => {
       expect(calls.some((call) => call.url === '/api/questions/answer' && call.method === 'POST')).toBe(true)
@@ -641,8 +709,63 @@ describe('console pages', () => {
     expect(JSON.parse(answerCall.body).answer_text).toBe('Remote, New York')
   })
 
-  it('runs page renders operational history rows', async () => {
+  it('review page honors legacy tab query params and opens the matching section', async () => {
+    const live = { refresh: vi.fn().mockResolvedValue({}) }
     installFetchMock(async ({ url }) => {
+      if (url === '/api/review/queue') {
+        return {
+          items: [
+            {
+              application_id: '001',
+              company: 'Acme',
+              title: 'Backend Engineer',
+              status: 'needs_user_input',
+              review_status: 'needs_user_input',
+              review_summary: { severity: 'danger', next_action: 'save_answers', next_action_reason: 'Needs answers.' },
+              manual_handoff: { active: false, status: 'idle', pending_count: 0 },
+            },
+          ],
+        }
+      }
+      if (url === '/api/applications/001') {
+        return {
+          application: { application_id: '001', company: 'Acme', role: 'Backend Engineer', status: 'Needs Input', source: 'greenhouse' },
+          submission: { status: 'needs_user_input' },
+          summary: { next_action: 'save_answers', next_action_reason: 'Needs answers.', blocker_count: 1, warning_count: 0, missing_required_count: 1, ungrounded_count: 0, low_confidence_count: 0, classification: {} },
+          blockers: [{ category: 'missing_required_field', label: 'Need start date' }],
+          questions: [],
+          artifacts: [],
+          history: [{ type: 'review.answer.saved', actor: 'operator', summary: 'Saved an answer.', timestamp: '2026-04-15T12:00:00Z', metadata: {} }],
+          report_markdown: '# Acme',
+        }
+      }
+      return null
+    })
+
+    renderWithRouter(<ReviewPage operator={buildOperator()} live={live} />, '/review?application_id=001&tab=history')
+
+    await screen.findByText('Selected Application')
+    expect(screen.getByText('Saved an answer.')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /Questions/i }))
+
+    await waitFor(() => {
+      expect(window.location.search).toContain('tab=questions')
+    })
+  })
+
+  it('app exposes four primary nav items and keeps /runs on the dashboard view', async () => {
+    installFetchMock(async ({ url }) => {
+      if (url === '/api/live/status?limit=60') {
+        return { state: { run_type: 'idle', status: 'idle', stage: 'idle', latest_operator_message: 'No active run.' }, events: [] }
+      }
+      if (url === '/api/dashboard') {
+        return {
+          snapshot: { counts: { inbox: 1, applications: 1 } },
+          autonomous: { queue_depth: 1, blocked_by_questions: 0, ready_to_apply: 1, ready_to_apply_threshold: 5, unresolved_prompts: 0 },
+          jobs_table: { items: [] },
+        }
+      }
       if (url === '/api/runs/history') {
         return {
           items: [
@@ -663,9 +786,14 @@ describe('console pages', () => {
       return null
     })
 
-    render(<RunsPage />)
+    renderWithRouter(<App />, '/runs')
 
-    await screen.findByText('Operational History')
+    await screen.findByText('Overview And Health')
+    expect(screen.queryByText('Live Operator State')).toBeNull()
+    expect(screen.getByRole('link', { name: 'Dashboard' }).className).toContain('active')
+    expect(screen.getByRole('link', { name: 'Autopilot' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Review' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Settings' })).toBeTruthy()
     expect(screen.getByText('run-001')).toBeTruthy()
     expect(screen.getByText(/submitted 2 \/ failed 1/)).toBeTruthy()
   })

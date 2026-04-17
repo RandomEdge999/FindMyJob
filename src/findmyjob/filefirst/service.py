@@ -11,11 +11,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import anyio
 import httpx
 
+from findmyjob.apply.browser import PlaywrightSubmitter
 from findmyjob.core.async_compat import run_async
 from tomlkit import dumps, item, parse, table
 
@@ -64,6 +65,8 @@ _HANDLED_INBOX_STATES = {"screened_out", "dismissed", "archived", "rejected"}
 class FileFirstOperatorService:
     _WORKER_LOCK = threading.RLock()
     _ACTIVE_WORKERS: dict[str, dict[str, Any]] = {}
+    _MANUAL_HANDOFF_WATCH_LOCK = threading.RLock()
+    _MANUAL_HANDOFF_WATCHERS: dict[str, dict[str, Any]] = {}
 
     def __init__(self, workspace: Path | FileWorkspace | None) -> None:
         self.workspace = workspace if isinstance(workspace, FileWorkspace) else FileWorkspace(Path.cwd() if workspace is None else Path(workspace))
@@ -2775,19 +2778,38 @@ class FileFirstOperatorService:
             if browser_left_open
             else "Prepared manual-handoff preview, but the browser could not be kept open automatically."
         )
+        result_payload = self._merge_result_payload(record, result.model_dump(mode="json"))
         updated = record.model_copy(
             update={
                 "artifacts": merged_artifacts,
                 "warnings": self._dedupe_strings(list(record.warnings) + [handoff_note]),
                 "notes": self._dedupe_strings(list(record.notes) + [handoff_note]),
-                "result": result.model_dump(mode="json"),
+                "result": result_payload,
                 "event_status": "manual_handoff_ready",
                 "updated_at": utcnow_iso(),
                 "run_id": run_id,
             }
         )
+        updated = self._append_review_history_event_to_record(
+            updated,
+            event_type="review.manual_handoff.opened",
+            summary=(
+                "Opened a partially filled browser page for manual completion."
+                if browser_left_open
+                else "Prepared a manual-handoff preview, but the browser could not be kept open."
+            ),
+            actor="system",
+            metadata={
+                "browser_left_open": browser_left_open,
+                "manual_handoff_final_url": merged_artifacts.get("manual_handoff_final_url"),
+            },
+        )
         self.workspace.save_submission(updated)
         self.workspace.upsert_application(application.model_copy(update={"status": "Needs Input", "pdf": True, "notes": handoff_note}))
+        if browser_left_open:
+            self._start_manual_handoff_watcher(application.id)
+        else:
+            self._stop_manual_handoff_watcher(application.id, status="manual_handoff_unavailable")
         trace_ref = self._persist_trace_payload(
             run_id or "manual",
             category="submission-steps",
@@ -3340,39 +3362,98 @@ class FileFirstOperatorService:
         items.sort(key=lambda item: (str(item.get("company") or ""), str(item.get("title") or ""), str(item.get("prompt_text") or "")))
         return {"count": len(items), "items": items[:limit]}
 
-    def answer_question(self, *, application_id: str, question_id: str, answer_text: str, approve_memory: bool = False, auto_retry: bool = True) -> dict[str, Any]:
-        record = self.workspace.load_submission(application_id)
-        if record is None:
-            raise ValueError(f"Unknown submission record: {application_id}")
-        if not self._is_active_submission(record):
-            raise ValueError(f"Submission is not active: {application_id}")
-        application = self.workspace.find_application(application_id)
-        if application is not None and application.status in _INACTIVE_APPLICATION_STATUSES:
-            raise ValueError(f"Application is not actionable: {application_id}")
-        raw_answer = str(answer_text or "")
-        cleaned_answer = raw_answer.strip()
-        found_question: SubmissionQuestion | None = None
-        found_index: int | None = None
+    @staticmethod
+    def _find_submission_question(record: SubmissionRecord, question_id: str) -> tuple[SubmissionQuestion | None, int | None]:
         for index, question in enumerate(record.questions):
             if question.question_id == question_id:
-                found_question = question
-                found_index = index
-                break
+                return question, index
+        return None, None
+
+    @classmethod
+    def _is_transient_submission_question(
+        cls,
+        question: SubmissionQuestion | None = None,
+        *,
+        question_id: str | None = None,
+        normalized_key: str | None = None,
+        prompt_text: str | None = None,
+    ) -> bool:
+        resolved_question_id = str(question.question_id if question is not None else question_id or "").strip().casefold()
+        resolved_normalized = str(question.normalized_key if question is not None else normalized_key or "").strip().casefold()
+        resolved_prompt = str(question.prompt_text if question is not None else prompt_text or "").strip().casefold()
+        if resolved_question_id == cls._email_verification_question_id():
+            return True
+        if resolved_normalized == cls._email_verification_question_id():
+            return True
+        transient_tokens = (
+            "verification code",
+            "security code",
+            "one-time code",
+            "one time code",
+            "otp",
+        )
+        return any(token in resolved_prompt for token in transient_tokens)
+
+    def _clear_transient_submission_answer(
+        self,
+        record: SubmissionRecord,
+        *,
+        question_id: str,
+        confidence_reason: str = "transient_answer_not_persisted",
+    ) -> tuple[SubmissionRecord, SubmissionQuestion | None]:
+        found_question, found_index = self._find_submission_question(record, question_id)
+        manual_answers = dict(record.manual_answers)
+        manual_answers.pop(question_id, None)
+        updated_record = record
+        updated_question: SubmissionQuestion | None = found_question
+        if found_question is not None and found_index is not None:
+            updated_question = found_question.model_copy(
+                update={
+                    "existing_answer": None,
+                    "confidence": 0.0 if found_question.needs_user_input else found_question.confidence,
+                    "confidence_reason": confidence_reason,
+                }
+            )
+            updated_questions = list(record.questions)
+            updated_questions[found_index] = updated_question
+            updated_record = record.model_copy(
+                update={
+                    "questions": updated_questions,
+                    "manual_answers": manual_answers,
+                    "updated_at": utcnow_iso(),
+                }
+            )
+            return updated_record, updated_question
+        return record.model_copy(update={"manual_answers": manual_answers, "updated_at": utcnow_iso()}), updated_question
+
+    def _apply_manual_answer_to_record(
+        self,
+        record: SubmissionRecord,
+        *,
+        question_id: str,
+        answer_text: str,
+        confidence_reason: str = "manual_override",
+        verification_status: str = "verified",
+        event_status: str = "manual_answer_recorded",
+    ) -> tuple[SubmissionRecord, SubmissionQuestion]:
+        cleaned_answer = str(answer_text or "").strip()
+        found_question, found_index = self._find_submission_question(record, question_id)
         if found_question is None or found_index is None:
             raise ValueError(f"Unknown question: {question_id}")
         if found_question.required and not cleaned_answer:
             raise ValueError("Answer cannot be empty for required questions.")
-        answer_to_store = cleaned_answer
-        updated_questions = list(record.questions)
-        updated_questions[found_index] = found_question.model_copy(
+
+        updated_question = found_question.model_copy(
             update={
-                "existing_answer": answer_to_store,
+                "existing_answer": cleaned_answer,
                 "confidence": 1.0,
-                "confidence_reason": "manual_override",
+                "confidence_reason": confidence_reason,
                 "needs_user_input": False,
-                "verification_status": "verified",
+                "verification_status": verification_status,
             }
         )
+        updated_questions = list(record.questions)
+        updated_questions[found_index] = updated_question
 
         blocker_aliases = {slugify(question_id)}
         if found_question.normalized_key:
@@ -3390,8 +3471,8 @@ class FileFirstOperatorService:
             return slugify(cleaned) in blocker_aliases
 
         manual_answers = dict(record.manual_answers)
-        manual_answers[question_id] = answer_to_store
-        record = record.model_copy(
+        manual_answers[question_id] = cleaned_answer
+        updated_record = record.model_copy(
             update={
                 "questions": updated_questions,
                 "manual_answers": manual_answers,
@@ -3399,8 +3480,820 @@ class FileFirstOperatorService:
                 "ungrounded_answers": [item for item in record.ungrounded_answers if not _is_answered_blocker(item)],
                 "low_confidence_answers": [item for item in record.low_confidence_answers if not _is_answered_blocker(item)],
                 "updated_at": utcnow_iso(),
-                "event_status": "manual_answer_recorded",
+                "event_status": event_status,
             }
+        )
+        return updated_record, updated_question
+
+    def _store_approved_answer_memory_entry(
+        self,
+        *,
+        record: SubmissionRecord,
+        question: SubmissionQuestion,
+        answer_text: str,
+    ) -> None:
+        cleaned_answer = str(answer_text or "").strip()
+        if not cleaned_answer:
+            return
+        if self._is_transient_submission_question(question):
+            return
+        from findmyjob.filefirst.models import AnswerMemoryEntry
+
+        canonical_question = question.normalized_key or question.question_id
+        option_signature = "|".join(
+            sorted(str(option).strip().lower() for option in question.options if str(option).strip())
+        )
+        context_constraints = {
+            "question_type": str(question.question_type or "unknown"),
+            "source_adapter": str(record.source or "").strip(),
+            "option_signature": option_signature,
+        }
+        answers = list(self.workspace.load_answer_memory())
+        duplicate = any(
+            item.canonical_question == canonical_question
+            and dict(item.context_constraints or {}) == context_constraints
+            and str(item.answer_text or "").strip() == cleaned_answer
+            for item in answers
+        )
+        if duplicate:
+            return
+        answers.append(
+            AnswerMemoryEntry(
+                canonical_question=canonical_question,
+                context_constraints=context_constraints,
+                answer_text=cleaned_answer,
+                grounded_fact_ids=[],
+                approved=True,
+            )
+        )
+        self.workspace.save_answer_memory(answers)
+
+    def _manual_handoff_submitter(self) -> PlaywrightSubmitter:
+        automation = self.workspace.load_profile().runtime.automation
+        browser_mode = str(automation.browser_mode or "headed").strip().lower() or "headed"
+        timeout_seconds = 60 if browser_mode in {"headed", "attached"} else 30
+        return PlaywrightSubmitter(
+            timeout_seconds=timeout_seconds,
+            browser_attach_enabled=True,
+            browser_cdp_url=str(automation.browser_cdp_url or "").strip() or "http://127.0.0.1:9222",
+            browser_mode=browser_mode,
+            max_open_tabs=int(automation.max_open_tabs or 10),
+        )
+
+    @staticmethod
+    def _submission_question_binding(question: SubmissionQuestion) -> FormFieldBinding:
+        metadata = {
+            "question_id": question.question_id,
+            "section": question.section,
+            "group": question.section,
+            "option_details": list(question.option_details),
+            "submission_binding": dict(question.submission_binding or {}),
+            "input_type": question.question_type,
+        }
+        return FormFieldBinding(
+            source_field_name=str(question.source_field_name or question.question_id),
+            widget_type=str(question.widget_type or "text"),
+            prompt_text=question.prompt_text,
+            required=question.required,
+            metadata=metadata,
+        )
+
+    def _load_manual_handoff_watch_state(self, application_id: str) -> dict[str, Any]:
+        record = self.workspace.load_submission(application_id)
+        if record is None:
+            return {}
+        payload = dict(record.result or {}).get("manual_handoff_watch")
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _update_manual_handoff_watch_state(self, application_id: str, **updates: Any) -> dict[str, Any] | None:
+        with self._MANUAL_HANDOFF_WATCH_LOCK:
+            record = self.workspace.load_submission(application_id)
+            if record is None:
+                return None
+            result_payload = dict(record.result or {})
+            state = dict(result_payload.get("manual_handoff_watch") or {})
+            if updates.get("active") and not state.get("started_at") and "started_at" not in updates:
+                state["started_at"] = utcnow_iso()
+            state.update(updates)
+            result_payload["manual_handoff_watch"] = state
+            self.workspace.save_submission(
+                record.model_copy(
+                    update={
+                        "result": result_payload,
+                        "updated_at": utcnow_iso(),
+                    }
+                )
+            )
+            return state
+
+    @staticmethod
+    def _review_history_entries(record: SubmissionRecord | None) -> list[dict[str, Any]]:
+        if record is None:
+            return []
+        payload = dict(record.result or {})
+        history = payload.get("review_history")
+        if not isinstance(history, list):
+            return []
+        entries: list[dict[str, Any]] = []
+        for item in history:
+            if isinstance(item, dict):
+                entries.append(dict(item))
+        return entries
+
+    def _merge_result_payload(self, record: SubmissionRecord, payload: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(record.result or {})
+        merged.update(payload)
+        return merged
+
+    def _append_review_history_event_to_record(
+        self,
+        record: SubmissionRecord,
+        *,
+        event_type: str,
+        summary: str,
+        actor: str = "operator",
+        metadata: dict[str, Any] | None = None,
+        timestamp: str | None = None,
+    ) -> SubmissionRecord:
+        result_payload = dict(record.result or {})
+        history = self._review_history_entries(record)
+        history.append(
+            {
+                "timestamp": timestamp or utcnow_iso(),
+                "type": str(event_type or "").strip() or "review.event",
+                "actor": str(actor or "").strip() or "operator",
+                "summary": str(summary or "").strip() or "Review event recorded.",
+                "metadata": dict(metadata or {}),
+            }
+        )
+        result_payload["review_history"] = history[-80:]
+        return record.model_copy(update={"result": result_payload, "updated_at": utcnow_iso()})
+
+    def _append_review_history_event(
+        self,
+        application_id: str,
+        *,
+        event_type: str,
+        summary: str,
+        actor: str = "operator",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        record = self.workspace.load_submission(application_id)
+        if record is None:
+            application = self.workspace.find_application(application_id)
+            if application is None:
+                return
+            job = self.workspace.load_job(application.job_id)
+            record = SubmissionRecord(
+                application_id=application.id,
+                job_id=application.job_id,
+                company=application.company,
+                role=application.role,
+                source=application.source,
+                apply_url=(getattr(job, "apply_url", None) or application.url),
+            )
+        updated = self._append_review_history_event_to_record(
+            record,
+            event_type=event_type,
+            summary=summary,
+            actor=actor,
+            metadata=metadata,
+        )
+        self.workspace.save_submission(updated)
+
+    def _manual_handoff_summary(self, submission: SubmissionRecord | None) -> dict[str, Any]:
+        watch = dict((submission.result or {}).get("manual_handoff_watch") or {}) if submission is not None else {}
+        return {
+            "active": bool(watch.get("active")),
+            "status": str(watch.get("status") or ("watching" if watch.get("active") else "idle")),
+            "last_synced_at": watch.get("last_synced_at"),
+            "pending_count": int(watch.get("pending_count") or 0),
+            "sync_count": int(watch.get("sync_count") or 0),
+            "synced_question_count": int(watch.get("synced_question_count") or 0),
+            "filled_blank_count": int(watch.get("filled_blank_count") or 0),
+            "corrected_answer_count": int(watch.get("corrected_answer_count") or 0),
+        }
+
+    def _review_summary(
+        self,
+        *,
+        application: ApplicationEntry,
+        job: Any,
+        submission: SubmissionRecord | None,
+    ) -> dict[str, Any]:
+        blockers = self._submission_blockers(submission)
+        hard_blockers = [item for item in blockers if str(item.get("category") or "").strip() != "warning"]
+        warnings = list(submission.warnings) if submission is not None else []
+        unresolved_question_count = sum(
+            1 for item in (submission.questions if submission is not None else [])
+            if item.needs_user_input
+        )
+        manual_handoff = self._manual_handoff_summary(submission)
+        review_status = str(submission.status if submission is not None else "not_prepared")
+        ready_for_submit = bool(
+            (submission.submit_ready if submission is not None else False)
+            or application.status == "Ready to Submit"
+            or review_status in {"preview_ready", "ready_to_submit"}
+        )
+
+        if manual_handoff["active"]:
+            next_action = "sync_manual_input"
+            next_action_reason = "A parked browser page is being watched. Sync any manual edits back into answer memory."
+        elif hard_blockers:
+            next_action = "open_manual_input" if review_status in {"needs_user_input", "blocked", "preview_ready"} else "save_answers"
+            next_action_reason = "Required questions or low-confidence answers still block submission."
+        elif unresolved_question_count:
+            next_action = "save_answers"
+            next_action_reason = "Unresolved prompts are still waiting for operator answers."
+        elif ready_for_submit:
+            next_action = "approve"
+            next_action_reason = "No remaining blockers are recorded. The application is ready to submit."
+        elif warnings:
+            next_action = "review_summary"
+            next_action_reason = "Warnings remain, but there are no hard blockers."
+        else:
+            next_action = "approve"
+            next_action_reason = "The application is ready for operator review."
+
+        if hard_blockers:
+            severity = "danger"
+        elif warnings or manual_handoff["active"] or bool(getattr(job, "login_wall_detected", False)):
+            severity = "warning"
+        elif ready_for_submit:
+            severity = "success"
+        else:
+            severity = "neutral"
+
+        screening = screening_payload(job) if job is not None else None
+        screening = screening if isinstance(screening, dict) else {}
+        classification = {
+            "board_family": getattr(job, "board_family", None) if job is not None else None,
+            "automation_tier": getattr(job, "automation_tier", None) if job is not None else None,
+            "ats_family": getattr(job, "ats_family", None) if job is not None else None,
+            "ats_preview_supported": getattr(job, "ats_preview_supported", None) if job is not None else None,
+            "rehearsal_eligible": getattr(job, "rehearsal_eligible", None) if job is not None else None,
+        }
+        return {
+            "severity": severity,
+            "review_status": review_status,
+            "application_status": application.status,
+            "ready_for_submit": ready_for_submit,
+            "blocker_count": len(hard_blockers),
+            "warning_count": len(warnings),
+            "missing_required_count": len(submission.missing_required_fields) if submission is not None else 0,
+            "ungrounded_count": len(submission.ungrounded_answers) if submission is not None else 0,
+            "low_confidence_count": len(submission.low_confidence_answers) if submission is not None else 0,
+            "unresolved_question_count": unresolved_question_count,
+            "next_action": next_action,
+            "next_action_reason": next_action_reason,
+            "screening_status": screening.get("status"),
+            "screening_approved": bool(screening.get("approved")),
+            "classification": classification,
+            "login_wall_detected": bool(getattr(job, "login_wall_detected", False)) if job is not None else False,
+            "hard_reject_reason": getattr(job, "hard_reject_reason", None) if job is not None else None,
+            "auth_reject_reason": getattr(job, "auth_reject_reason", None) if job is not None else None,
+            "blocker_labels": [item.get("label") for item in hard_blockers if item.get("label")],
+            "warning_labels": list(warnings),
+        }
+
+    def _workspace_file_ref(self, value: Any) -> dict[str, Any] | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        lowered = raw.lower()
+        if lowered.startswith("http://") or lowered.startswith("https://"):
+            return {
+                "target": raw,
+                "href": raw,
+                "relative_path": None,
+                "exists": True,
+                "external": True,
+            }
+        candidate = Path(raw)
+        resolved = candidate if candidate.is_absolute() else (self.workspace.root / candidate)
+        exists = resolved.exists()
+        relative = self.workspace.relative_path(resolved).replace("\\", "/")
+        return {
+            "target": str(resolved if resolved.is_absolute() else candidate),
+            "href": f"/files/{quote(relative, safe='/')}" if exists else None,
+            "relative_path": relative,
+            "exists": exists,
+            "external": False,
+        }
+
+    def _normalized_artifacts(
+        self,
+        *,
+        application: ApplicationEntry,
+        submission: SubmissionRecord | None,
+    ) -> list[dict[str, Any]]:
+        combined: dict[str, Any] = {}
+        combined.update(self._artifact_map(application))
+        if application.report:
+            combined.setdefault("evaluation_report", application.report)
+        if application.url:
+            combined.setdefault("job_posting", application.url)
+        if submission is not None:
+            combined.update(dict(submission.artifacts or {}))
+
+        label_map = {
+            "resume_pdf": ("resume_pdf", "Resume PDF", "primary"),
+            "cover_letter_pdf": ("cover_letter_pdf", "Cover Letter PDF", "primary"),
+            "evaluation_report": ("evaluation_report", "Evaluation Report", "primary"),
+            "job_posting": ("job_posting", "Job Posting", "primary"),
+            "resume_text": ("resume_text", "Resume Source", "supporting"),
+            "cover_letter_text": ("cover_letter_text", "Cover Letter Source", "supporting"),
+            "manual_handoff_final_url": ("manual_handoff_page", "Manual Handoff Page", "debug"),
+            "manual_handoff_pre_submit_snapshot": ("manual_handoff_pre_submit_snapshot", "Manual Handoff Pre-Submit Snapshot", "debug"),
+            "manual_handoff_final_snapshot": ("manual_handoff_final_snapshot", "Manual Handoff Final Snapshot", "debug"),
+            "manual_handoff_dom_snapshot": ("manual_handoff_dom_snapshot", "Manual Handoff DOM Snapshot", "debug"),
+            "manual_handoff_post_submit_dom_snapshot": ("manual_handoff_post_submit_dom_snapshot", "Manual Handoff Post-Submit DOM Snapshot", "debug"),
+            "manual_handoff_trace": ("manual_handoff_trace", "Manual Handoff Trace", "debug"),
+            "snapshot_path": ("submission_snapshot", "Submission Snapshot", "debug"),
+            "trace_path": ("submission_trace", "Submission Trace", "debug"),
+            "pre_submit_snapshot": ("pre_submit_snapshot", "Pre-Submit Snapshot", "debug"),
+            "final_snapshot": ("final_snapshot", "Final Snapshot", "debug"),
+            "dom_snapshot": ("dom_snapshot", "DOM Snapshot", "debug"),
+            "post_submit_dom_snapshot": ("post_submit_dom_snapshot", "Post-Submit DOM Snapshot", "debug"),
+            "browser_trace": ("browser_trace", "Browser Trace", "debug"),
+        }
+        ordered_keys = [
+            "resume_pdf",
+            "cover_letter_pdf",
+            "evaluation_report",
+            "job_posting",
+            "resume_text",
+            "cover_letter_text",
+            "manual_handoff_final_url",
+            "manual_handoff_pre_submit_snapshot",
+            "manual_handoff_final_snapshot",
+            "manual_handoff_dom_snapshot",
+            "manual_handoff_post_submit_dom_snapshot",
+            "manual_handoff_trace",
+            "snapshot_path",
+            "trace_path",
+            "pre_submit_snapshot",
+            "final_snapshot",
+            "dom_snapshot",
+            "post_submit_dom_snapshot",
+            "browser_trace",
+        ]
+        artifacts: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for key in ordered_keys:
+            value = combined.get(key)
+            ref = self._workspace_file_ref(value)
+            if ref is None:
+                continue
+            kind, label, group = label_map.get(key, (key, key.replace("_", " ").title(), "supporting"))
+            dedupe_key = (kind, str(ref.get("target") or ""))
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            artifacts.append(
+                {
+                    "kind": kind,
+                    "label": label,
+                    "group": group,
+                    **ref,
+                }
+            )
+        return artifacts
+
+    async def _capture_manual_handoff_answers_async(self, application_id: str) -> dict[str, Any]:
+        record = self.workspace.load_submission(application_id)
+        if record is None:
+            return {
+                "application_id": application_id,
+                "page_found": False,
+                "page_url": None,
+                "answers": [],
+                "error": "Submission record not found.",
+            }
+        application = self.workspace.find_application(application_id)
+        target_url = (
+            str(record.artifacts.get("manual_handoff_final_url") or "").strip()
+            or str(record.apply_url or "").strip()
+            or str(application.url if application is not None else "").strip()
+        )
+        bindings = [
+            self._submission_question_binding(question)
+            for question in record.questions
+            if str(question.question_type or "").strip().lower() != "file"
+        ]
+        if not bindings:
+            return {
+                "application_id": application_id,
+                "page_found": False,
+                "page_url": target_url or None,
+                "answers": [],
+                "error": "No capture-ready questions are available for this handoff.",
+            }
+        submitter = self._manual_handoff_submitter()
+        captured = await submitter.capture_manual_handoff_answers(
+            application_url=target_url,
+            bindings=bindings,
+        )
+        captured["application_id"] = application_id
+        return captured
+
+    def _persist_manual_handoff_captures(
+        self,
+        *,
+        application_id: str,
+        captures: list[dict[str, Any]],
+        approve_memory: bool = True,
+        confidence_reason: str = "manual_handoff_sync",
+    ) -> dict[str, Any]:
+        record = self.workspace.load_submission(application_id)
+        if record is None:
+            raise ValueError(f"Unknown submission record: {application_id}")
+        updated_questions: list[dict[str, Any]] = []
+        filled_blank_count = 0
+        corrected_answer_count = 0
+        record_dirty = False
+
+        for capture in captures:
+            question_id = str(capture.get("question_id") or "").strip()
+            answer_text = str(capture.get("answer_text") or "").strip()
+            if not question_id or not answer_text:
+                continue
+            question, _index = self._find_submission_question(record, question_id)
+            if question is None:
+                continue
+            if self._is_transient_submission_question(question):
+                record, _ = self._clear_transient_submission_answer(record, question_id=question_id)
+                record_dirty = True
+                continue
+            previous_answer = str(record.manual_answers.get(question_id) or question.existing_answer or "").strip()
+            if previous_answer == answer_text:
+                continue
+            record, updated_question = self._apply_manual_answer_to_record(
+                record,
+                question_id=question_id,
+                answer_text=answer_text,
+                confidence_reason=confidence_reason,
+                verification_status="verified",
+                event_status="manual_handoff_synced",
+            )
+            if approve_memory:
+                self._store_approved_answer_memory_entry(
+                    record=record,
+                    question=updated_question,
+                    answer_text=answer_text,
+                )
+            if previous_answer:
+                corrected_answer_count += 1
+            else:
+                filled_blank_count += 1
+            record_dirty = True
+            updated_questions.append(
+                {
+                    "question_id": question_id,
+                    "prompt_text": updated_question.prompt_text,
+                    "previous_answer": previous_answer,
+                    "answer_text": answer_text,
+                    "widget_type": updated_question.widget_type,
+                    "filled_blank": not previous_answer,
+                    "corrected_answer": bool(previous_answer),
+                    "change_type": "filled_blank" if not previous_answer else "corrected_answer",
+                }
+            )
+
+        if record_dirty:
+            if updated_questions:
+                record = self._append_review_history_event_to_record(
+                    record,
+                    event_type="review.manual_handoff.synced",
+                    summary=f"Learned {len(updated_questions)} answer(s) from the parked browser page.",
+                    actor="watcher" if confidence_reason == "manual_handoff_watch" else "operator",
+                    metadata={
+                        "source": confidence_reason,
+                        "updated_count": len(updated_questions),
+                        "filled_blank_count": filled_blank_count,
+                        "corrected_answer_count": corrected_answer_count,
+                        "updated_questions": updated_questions,
+                    },
+                )
+            self.workspace.save_submission(record)
+        if updated_questions:
+            application = self.workspace.find_application(application_id)
+            if application is not None and application.status not in _INACTIVE_APPLICATION_STATUSES and application.status != "Applied":
+                blockers = self._submission_blockers(record)
+                next_status = "Ready to Submit" if not blockers else "Needs Input"
+                self.workspace.upsert_application(application.model_copy(update={"status": next_status}))
+            operator_emit_live_event(
+                self.workspace,
+                run_id=record.run_id or "manual",
+                run_type="submission",
+                event_type="submission.manual_handoff.synced",
+                stage="question_resolution",
+                status="running",
+                message=f"Captured {len(updated_questions)} manual browser answer(s) for {record.company} / {record.role}.",
+                job_id=record.job_id,
+                application_id=record.application_id,
+                company=record.company,
+                role=record.role,
+                source=record.source,
+                payload={
+                    "updated_questions": updated_questions,
+                    "filled_blank_count": filled_blank_count,
+                    "corrected_answer_count": corrected_answer_count,
+                },
+            )
+
+        return {
+            "application_id": application_id,
+            "updated_count": len(updated_questions),
+            "filled_blank_count": filled_blank_count,
+            "corrected_answer_count": corrected_answer_count,
+            "updated_questions": updated_questions,
+            "remaining_blockers": self._submission_blockers(record),
+            "status": record.status,
+        }
+
+    async def _sync_manual_handoff_answers_async(
+        self,
+        application_id: str,
+        approve_memory: bool = True,
+        source: str = "manual_handoff_sync",
+    ) -> dict[str, Any]:
+        captured = await self._capture_manual_handoff_answers_async(application_id)
+        current_state = self._load_manual_handoff_watch_state(application_id)
+        now = utcnow_iso()
+        update_payload: dict[str, Any] = {
+            "last_source": source,
+            "last_sync_attempt_at": now,
+            "last_error": str(captured.get("error") or "").strip() or None,
+            "status": "page_not_found",
+            "active": bool(current_state.get("active")),
+            "sync_count": int(current_state.get("sync_count") or 0),
+            "synced_question_count": int(current_state.get("synced_question_count") or 0),
+            "filled_blank_count": int(current_state.get("filled_blank_count") or 0),
+            "corrected_answer_count": int(current_state.get("corrected_answer_count") or 0),
+            "recent_answers": list(current_state.get("recent_answers") or []),
+        }
+        persisted = {
+            "application_id": application_id,
+            "updated_count": 0,
+            "filled_blank_count": 0,
+            "corrected_answer_count": 0,
+            "updated_questions": [],
+            "remaining_blockers": self._submission_blockers(self.workspace.load_submission(application_id)),
+            "status": None,
+        }
+
+        if captured.get("page_found"):
+            update_payload.update(
+                {
+                    "active": True,
+                    "status": "watching",
+                    "last_error": None,
+                    "last_page_url": captured.get("page_url"),
+                    "last_page_seen_at": now,
+                    "last_synced_at": now,
+                    "sync_count": int(update_payload["sync_count"]) + 1,
+                }
+            )
+            persisted = self._persist_manual_handoff_captures(
+                application_id=application_id,
+                captures=list(captured.get("answers") or []),
+                approve_memory=approve_memory,
+                confidence_reason=source,
+            )
+            update_payload["synced_question_count"] = int(update_payload["synced_question_count"]) + int(persisted["updated_count"])
+            update_payload["filled_blank_count"] = int(update_payload["filled_blank_count"]) + int(persisted["filled_blank_count"])
+            update_payload["corrected_answer_count"] = int(update_payload["corrected_answer_count"]) + int(
+                persisted["corrected_answer_count"]
+            )
+            if persisted["updated_questions"]:
+                update_payload["recent_answers"] = list(persisted["updated_questions"][-5:])
+                update_payload["last_saved_at"] = now
+
+        watch_state = self._update_manual_handoff_watch_state(application_id, **update_payload)
+        return {
+            **captured,
+            **persisted,
+            "watch_state": watch_state,
+        }
+
+    def _is_manual_handoff_watch_terminal(self, application_id: str) -> bool:
+        record = self.workspace.load_submission(application_id)
+        if record is None or not self._is_active_submission(record):
+            return True
+        if str(record.status or "").strip().casefold() in _TERMINAL_SUBMISSION_STATUSES:
+            return True
+        application = self.workspace.find_application(application_id)
+        if application is not None and (application.status in _INACTIVE_APPLICATION_STATUSES or application.status == "Applied"):
+            return True
+        return False
+
+    def _manual_handoff_watch_loop(self, application_id: str, stop_event: threading.Event) -> None:
+        missing_page_count = 0
+        pending_text_answers: dict[str, dict[str, Any]] = {}
+        discrete_widgets = {"select", "dropdown", "checkbox", "checkbox_group", "radio", "radio_group"}
+        while not stop_event.wait(2.0):
+            if self._is_manual_handoff_watch_terminal(application_id):
+                self._update_manual_handoff_watch_state(
+                    application_id,
+                    active=False,
+                    status="stopped",
+                    last_error=None,
+                    pending_count=0,
+                )
+                break
+            try:
+                captured = run_async(self._capture_manual_handoff_answers_async, application_id)
+            except Exception as exc:
+                self._update_manual_handoff_watch_state(
+                    application_id,
+                    active=True,
+                    status="sync_failed",
+                    last_error=str(exc),
+                    last_sync_attempt_at=utcnow_iso(),
+                )
+                continue
+            now = utcnow_iso()
+            if not captured.get("page_found"):
+                missing_page_count += 1
+                self._update_manual_handoff_watch_state(
+                    application_id,
+                    active=missing_page_count < 3,
+                    status="page_not_found" if missing_page_count < 3 else "page_closed",
+                    last_error=str(captured.get("error") or "").strip() or None,
+                    last_sync_attempt_at=now,
+                    pending_count=0,
+                )
+                if missing_page_count >= 3:
+                    self._stop_manual_handoff_watcher(application_id, status="page_closed")
+                    break
+                continue
+            missing_page_count = 0
+            record = self.workspace.load_submission(application_id)
+            question_lookup = {question.question_id: question for question in (record.questions if record is not None else [])}
+            stable_captures: list[dict[str, Any]] = []
+            seen_text_question_ids: set[str] = set()
+            for capture in list(captured.get("answers") or []):
+                question_id = str(capture.get("question_id") or "").strip()
+                if not question_id:
+                    continue
+                answer_text = str(capture.get("answer_text") or "").strip()
+                if not answer_text:
+                    pending_text_answers.pop(question_id, None)
+                    continue
+                widget_type = str(
+                    capture.get("widget_type")
+                    or (question_lookup.get(question_id).widget_type if question_id in question_lookup else "")
+                ).strip().lower()
+                if widget_type in discrete_widgets:
+                    stable_captures.append(capture)
+                    pending_text_answers.pop(question_id, None)
+                    continue
+                seen_text_question_ids.add(question_id)
+                pending = dict(pending_text_answers.get(question_id) or {})
+                if str(pending.get("answer_text") or "") == answer_text:
+                    pending["seen_count"] = int(pending.get("seen_count") or 0) + 1
+                else:
+                    pending = {"answer_text": answer_text, "seen_count": 1}
+                pending_text_answers[question_id] = pending
+                if int(pending.get("seen_count") or 0) >= 2:
+                    stable_captures.append(capture)
+            for question_id in list(pending_text_answers):
+                if question_id not in seen_text_question_ids:
+                    pending_text_answers.pop(question_id, None)
+
+            current_state = self._load_manual_handoff_watch_state(application_id)
+            update_payload: dict[str, Any] = {
+                "active": True,
+                "status": "watching",
+                "last_error": None,
+                "last_source": "manual_handoff_watch",
+                "last_sync_attempt_at": now,
+                "last_synced_at": now,
+                "last_page_seen_at": now,
+                "last_page_url": captured.get("page_url"),
+                "sync_count": int(current_state.get("sync_count") or 0) + 1,
+                "synced_question_count": int(current_state.get("synced_question_count") or 0),
+                "filled_blank_count": int(current_state.get("filled_blank_count") or 0),
+                "corrected_answer_count": int(current_state.get("corrected_answer_count") or 0),
+                "recent_answers": list(current_state.get("recent_answers") or []),
+                "pending_count": len(pending_text_answers),
+            }
+            if stable_captures:
+                persisted = self._persist_manual_handoff_captures(
+                    application_id=application_id,
+                    captures=stable_captures,
+                    approve_memory=True,
+                    confidence_reason="manual_handoff_watch",
+                )
+                update_payload["synced_question_count"] = int(update_payload["synced_question_count"]) + int(persisted["updated_count"])
+                update_payload["filled_blank_count"] = int(update_payload["filled_blank_count"]) + int(persisted["filled_blank_count"])
+                update_payload["corrected_answer_count"] = int(update_payload["corrected_answer_count"]) + int(
+                    persisted["corrected_answer_count"]
+                )
+                if persisted["updated_questions"]:
+                    update_payload["recent_answers"] = list(persisted["updated_questions"][-5:])
+                    update_payload["last_saved_at"] = now
+                for capture in stable_captures:
+                    pending_text_answers.pop(str(capture.get("question_id") or "").strip(), None)
+                update_payload["pending_count"] = len(pending_text_answers)
+            self._update_manual_handoff_watch_state(application_id, **update_payload)
+
+    def _start_manual_handoff_watcher(self, application_id: str) -> bool:
+        with self._MANUAL_HANDOFF_WATCH_LOCK:
+            existing = self._MANUAL_HANDOFF_WATCHERS.get(application_id)
+            if existing is not None:
+                thread = existing.get("thread")
+                if thread is not None and thread.is_alive():
+                    self._update_manual_handoff_watch_state(
+                        application_id,
+                        active=True,
+                        status="watching",
+                        last_error=None,
+                    )
+                    return False
+                self._MANUAL_HANDOFF_WATCHERS.pop(application_id, None)
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=self._manual_handoff_watch_loop,
+                args=(application_id, stop_event),
+                name=f"fmj-manual-handoff-{application_id}",
+                daemon=True,
+            )
+            self._MANUAL_HANDOFF_WATCHERS[application_id] = {
+                "thread": thread,
+                "stop_event": stop_event,
+            }
+            self._update_manual_handoff_watch_state(
+                application_id,
+                active=True,
+                status="watching",
+                last_error=None,
+                started_at=utcnow_iso(),
+                pending_count=0,
+            )
+            thread.start()
+            return True
+
+    def _stop_manual_handoff_watcher(self, application_id: str, *, status: str = "stopped") -> None:
+        with self._MANUAL_HANDOFF_WATCH_LOCK:
+            existing = self._MANUAL_HANDOFF_WATCHERS.pop(application_id, None)
+        if existing is not None:
+            stop_event = existing.get("stop_event")
+            if isinstance(stop_event, threading.Event):
+                stop_event.set()
+        self._update_manual_handoff_watch_state(
+            application_id,
+            active=False,
+            status=status,
+            pending_count=0,
+        )
+
+    def answer_question(self, *, application_id: str, question_id: str, answer_text: str, approve_memory: bool = False, auto_retry: bool = True) -> dict[str, Any]:
+        record = self.workspace.load_submission(application_id)
+        if record is None:
+            raise ValueError(f"Unknown submission record: {application_id}")
+        if not self._is_active_submission(record):
+            raise ValueError(f"Submission is not active: {application_id}")
+        application = self.workspace.find_application(application_id)
+        if application is not None and application.status in _INACTIVE_APPLICATION_STATUSES:
+            raise ValueError(f"Application is not actionable: {application_id}")
+        found_question, _found_index = self._find_submission_question(record, question_id)
+        if found_question is None:
+            raise ValueError(f"Unknown question: {question_id}")
+        cleaned_answer = str(answer_text or "").strip()
+        transient_question = self._is_transient_submission_question(found_question)
+        if transient_question:
+            record, updated_question = self._clear_transient_submission_answer(
+                record,
+                question_id=question_id,
+                confidence_reason="transient_answer_not_persisted",
+            )
+            record = record.model_copy(update={"event_status": "manual_answer_recorded"})
+        else:
+            record, updated_question = self._apply_manual_answer_to_record(
+                record,
+                question_id=question_id,
+                answer_text=cleaned_answer,
+                confidence_reason="manual_override",
+                verification_status="verified",
+                event_status="manual_answer_recorded",
+            )
+        record = self._append_review_history_event_to_record(
+            record,
+            event_type="review.answer.saved",
+            summary=(
+                f"Recorded a transient verification step for {found_question.prompt_text}."
+                if transient_question
+                else f"Saved an answer for {found_question.prompt_text}."
+            ),
+            actor="operator",
+            metadata={
+                "question_id": question_id,
+                "prompt_text": found_question.prompt_text,
+                "transient": transient_question,
+                "approved_memory": bool(approve_memory and cleaned_answer and not transient_question),
+            },
         )
         self.workspace.save_submission(record)
         operator_emit_live_event(
@@ -3416,35 +4309,14 @@ class FileFirstOperatorService:
             company=record.company,
             role=record.role,
             source=record.source,
-            payload={"question_id": question_id},
+            payload={"question_id": question_id, "transient": transient_question},
         )
-        if approve_memory and answer_to_store:
-            from findmyjob.filefirst.models import AnswerMemoryEntry
-            canonical_question = found_question.normalized_key or question_id
-            option_signature = "|".join(sorted(str(option).strip().lower() for option in found_question.options if str(option).strip()))
-            context_constraints = {
-                "question_type": str(found_question.question_type or "unknown"),
-                "source_adapter": str(record.source or "").strip(),
-                "option_signature": option_signature,
-            }
-            answers = list(self.workspace.load_answer_memory())
-            duplicate = any(
-                item.canonical_question == canonical_question
-                and dict(item.context_constraints or {}) == context_constraints
-                and str(item.answer_text or "").strip() == cleaned_answer
-                for item in answers
+        if approve_memory and cleaned_answer and not transient_question:
+            self._store_approved_answer_memory_entry(
+                record=record,
+                question=updated_question,
+                answer_text=cleaned_answer,
             )
-            if not duplicate:
-                answers.append(
-                    AnswerMemoryEntry(
-                        canonical_question=canonical_question,
-                        context_constraints=context_constraints,
-                        answer_text=cleaned_answer,
-                        grounded_fact_ids=[],
-                        approved=True,
-                    )
-                )
-            self.workspace.save_answer_memory(answers)
         retry_payload: dict[str, Any] | None = None
         if auto_retry:
             try:
@@ -3470,7 +4342,13 @@ class FileFirstOperatorService:
                     state_updates={"latest_error": str(exc)},
                 )
                 retry_payload = {"status": "retry_failed", "submitted_application_ids": [], "still_pending_application_ids": [application_id], "error": str(exc)}
-        return {"application_id": application_id, "question": next(item.model_dump(mode="json") for item in updated_questions if item.question_id == question_id), "remaining_blockers": self._submission_blockers(self.workspace.load_submission(application_id)), "retry": retry_payload}
+        saved_record = self.workspace.load_submission(application_id)
+        return {
+            "application_id": application_id,
+            "question": updated_question.model_dump(mode="json"),
+            "remaining_blockers": self._submission_blockers(saved_record),
+            "retry": retry_payload,
+        }
 
     def review_queue_payload(self, *, limit: int = 40) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
@@ -3481,6 +4359,8 @@ class FileFirstOperatorService:
             submission = self.workspace.find_submission(application.id)
             if submission is not None and str(submission.status or "").strip().lower() == "submitted":
                 continue
+            review_summary = self._review_summary(application=application, job=job, submission=submission)
+            manual_handoff = self._manual_handoff_summary(submission)
             items.append(
                 {
                     "application_id": application.id,
@@ -3508,6 +4388,8 @@ class FileFirstOperatorService:
                     },
                     "remaining_blockers": self._submission_blockers(submission),
                     "report": application.report,
+                    "review_summary": review_summary,
+                    "manual_handoff": manual_handoff,
                 }
             )
         items.sort(key=lambda item: (item["status"], item["company"], item["title"]))
@@ -3524,13 +4406,74 @@ class FileFirstOperatorService:
         if application is None:
             raise ValueError(f"Unknown application: {application_id}")
         if action == "mark_submitted":
+            self._stop_manual_handoff_watcher(application_id, status="submitted")
             return self._mark_application_submitted_manually(application, reason=reason)
         if action == "reject":
+            self._stop_manual_handoff_watcher(application_id, status="rejected")
             self.workspace.upsert_application(application.model_copy(update={"status": "Rejected"}))
+            note = str(reason or "").strip() or "Rejected from the review console."
             record = self.workspace.load_submission(application_id)
-            if record is not None:
-                self.workspace.save_submission(record.model_copy(update={"status": "rejected", "reviewed": True}))
+            if record is None:
+                job = self.workspace.load_job(application.job_id)
+                record = SubmissionRecord(
+                    application_id=application.id,
+                    job_id=application.job_id,
+                    company=application.company,
+                    role=application.role,
+                    source=application.source,
+                    apply_url=(getattr(job, "apply_url", None) or application.url),
+                )
+            record = record.model_copy(
+                update={
+                    "status": "rejected",
+                    "reviewed": True,
+                    "notes": self._dedupe_strings(list(record.notes) + [note]),
+                    "updated_at": utcnow_iso(),
+                }
+            )
+            record = self._append_review_history_event_to_record(
+                record,
+                event_type="review.action.reject",
+                summary="Rejected the application from the review queue.",
+                actor="operator",
+                metadata={"reason": note},
+            )
+            self.workspace.save_submission(record)
             return {"application_id": application_id, "status": "rejected", "blocked": False, "remaining_blockers": []}
+        if action == "sync_manual_input":
+            result = run_async(
+                self._sync_manual_handoff_answers_async,
+                application_id,
+                True,
+                "manual_handoff_console_sync",
+            )
+            self._append_review_history_event(
+                application_id,
+                event_type="review.action.sync_manual_input",
+                summary=(
+                    "Synced browser changes from the parked manual-handoff page."
+                    if result.get("page_found")
+                    else "Tried to sync the parked manual-handoff page, but no live tab was found."
+                ),
+                actor="operator",
+                metadata={
+                    "page_found": bool(result.get("page_found")),
+                    "updated_count": int(result.get("updated_count") or 0),
+                    "filled_blank_count": int(result.get("filled_blank_count") or 0),
+                    "corrected_answer_count": int(result.get("corrected_answer_count") or 0),
+                },
+            )
+            return {
+                "application_id": application_id,
+                "status": result.get("status"),
+                "blocked": bool(result.get("remaining_blockers")),
+                "page_found": bool(result.get("page_found")),
+                "synced_count": int(result.get("updated_count") or 0),
+                "filled_blank_count": int(result.get("filled_blank_count") or 0),
+                "corrected_answer_count": int(result.get("corrected_answer_count") or 0),
+                "watch_state": result.get("watch_state"),
+                "remaining_blockers": list(result.get("remaining_blockers") or []),
+            }
         if action == "request_input":
             self.workspace.upsert_application(application.model_copy(update={"status": "Needs Input"}))
             record = run_async(self._prepare_submission_async, application_id, None)
@@ -3539,6 +4482,13 @@ class FileFirstOperatorService:
                 manual_handoff_opened = bool(run_async(self._open_manual_handoff_preview_async, application_id, None))
             except Exception:
                 manual_handoff_opened = False
+            self._append_review_history_event(
+                application_id,
+                event_type="review.action.request_input",
+                summary="Opened manual input mode from the review queue.",
+                actor="operator",
+                metadata={"manual_handoff_opened": manual_handoff_opened, "reason": str(reason or "").strip() or None},
+            )
             return {
                 "application_id": application_id,
                 "status": record.status,
@@ -3556,6 +4506,13 @@ class FileFirstOperatorService:
                 manual_handoff_opened = bool(run_async(self._open_manual_handoff_preview_async, application_id, None))
             except Exception:
                 manual_handoff_opened = False
+            self._append_review_history_event(
+                application_id,
+                event_type="review.action.approve",
+                summary="Approve / Apply was attempted, but blockers still require manual review.",
+                actor="operator",
+                metadata={"blocked": True, "manual_handoff_opened": manual_handoff_opened, "reason": str(reason or "").strip() or None},
+            )
             return {
                 "application_id": application_id,
                 "status": record.status,
@@ -3567,6 +4524,13 @@ class FileFirstOperatorService:
             record = self._continue_after_ready(application_id, None)
         else:
             self.workspace.upsert_application(application.model_copy(update={"status": "Ready to Submit"}))
+        self._append_review_history_event(
+            application_id,
+            event_type="review.action.approve",
+            summary="Approve / Apply advanced the application.",
+            actor="operator",
+            metadata={"blocked": False, "status": record.status, "reason": str(reason or "").strip() or None},
+        )
         return {"application_id": application_id, "status": record.status, "blocked": False, "auto_submitted": record.status == "submitted", "remaining_blockers": []}
 
     def application_detail_payload(self, application_id: str) -> dict[str, Any]:
@@ -3581,6 +4545,13 @@ class FileFirstOperatorService:
             report_path = (self.workspace.root / application.report).resolve()
             if report_path.exists():
                 report_text = report_path.read_text(encoding="utf-8")
+        summary = self._review_summary(application=application, job=job, submission=submission)
+        artifacts = self._normalized_artifacts(application=application, submission=submission)
+        history = sorted(
+            self._review_history_entries(submission),
+            key=lambda item: str(item.get("timestamp") or ""),
+            reverse=True,
+        )
         return {
             "application": {"application_id": application.id, "job_id": application.job_id, "company": application.company, "role": application.role, "status": application.status, "score": application.score, "grade": application.grade, "report": application.report, "url": application.url, "source": application.source},
             "job": job.model_dump(mode="json") if job is not None else None,
@@ -3588,6 +4559,10 @@ class FileFirstOperatorService:
             "questions": [item.model_dump(mode="json") for item in (submission.questions if submission is not None else [])],
             "blockers": self._submission_blockers(submission),
             "submission": submission.model_dump(mode="json") if submission is not None else None,
+            "manual_handoff_watch": dict((submission.result or {}).get("manual_handoff_watch") or {}) if submission is not None else {},
+            "summary": summary,
+            "artifacts": artifacts,
+            "history": history,
             "report_markdown": report_text,
         }
 
@@ -4393,7 +5368,7 @@ class FileFirstOperatorService:
                         "verification_status": verification_status,
                         "manual_override": question_id in manual_answers,
                     })
-                    questions.append(SubmissionQuestion(question_id=question_id, source_field_name=question.source_field_name, prompt_text=question.prompt_text, normalized_key=question.normalized_key, question_type=question.question_type.value, widget_type=question.widget_type, required=question.required, sensitive=question.sensitive, options=list(question.options), option_details=list(question.option_details), existing_answer=grounded.answer, confidence=float(grounded.confidence or 0.0), confidence_reason=grounded.reason, needs_user_input=needs_user_input, verification_status=verification_status))
+                    questions.append(SubmissionQuestion(question_id=question_id, source_field_name=question.source_field_name, prompt_text=question.prompt_text, normalized_key=question.normalized_key, question_type=question.question_type.value, widget_type=question.widget_type, section=question.section, required=question.required, sensitive=question.sensitive, options=list(question.options), option_details=list(question.option_details), submission_binding=dict(question.submission_binding or {}), existing_answer=grounded.answer, confidence=float(grounded.confidence or 0.0), confidence_reason=grounded.reason, needs_user_input=needs_user_input, verification_status=verification_status))
             plan = adapter.bind_answers(posting, question_answers, artifacts)
         except Exception as exc:
             trace_payload["error"] = str(exc)
@@ -4504,27 +5479,11 @@ class FileFirstOperatorService:
         return "email_verification_code"
 
     def _with_email_verification_code_binding(self, plan: SubmissionPlan, record: SubmissionRecord) -> SubmissionPlan:
-        question_id = self._email_verification_question_id()
-        code = re.sub(r"\s+", "", str(record.manual_answers.get(question_id) or ""))
-        if not code:
-            return plan
-        filtered_fields = [
-            field
-            for field in plan.fields
-            if str(field.metadata.get("runtime_binding") or "").strip().casefold() != question_id
-            and str(field.source_field_name or "").strip().casefold() != question_id
-        ]
-        filtered_fields.append(
-            FormFieldBinding(
-                source_field_name=question_id,
-                widget_type="text",
-                prompt_text="Security code",
-                required=True,
-                value=code,
-                metadata={"runtime_binding": question_id},
-            )
-        )
-        return plan.model_copy(update={"fields": filtered_fields})
+        _ = record
+        # Email verification codes are one-time credentials. The submitter should
+        # always fetch the current code from the inbox when the gate appears
+        # instead of reusing anything previously typed by a human.
+        return plan
 
     def _email_verification_required_message(self, result: Any) -> str | None:
         evidence = getattr(result, "evidence", None)
@@ -4544,7 +5503,8 @@ class FileFirstOperatorService:
     ) -> SubmissionRecord:
         question_id = self._email_verification_question_id()
         prompt = "Enter the 8-character verification code sent to your email to continue submission."
-        existing_answer = str(record.manual_answers.get(question_id) or "").strip() or None
+        record, _ = self._clear_transient_submission_answer(record, question_id=question_id)
+        existing_answer = None
         verification_question = SubmissionQuestion(
             question_id=question_id,
             source_field_name=question_id,
@@ -4552,11 +5512,12 @@ class FileFirstOperatorService:
             normalized_key=question_id,
             question_type="text",
             widget_type="text",
+            section="verification",
             required=True,
             sensitive=False,
             existing_answer=existing_answer,
-            confidence=1.0 if existing_answer else 0.0,
-            confidence_reason="manual_override" if existing_answer else "email_verification_required",
+            confidence=0.0,
+            confidence_reason="email_verification_required",
             needs_user_input=True,
             verification_status="needs_user_input",
         )
@@ -4568,6 +5529,7 @@ class FileFirstOperatorService:
         remaining_missing.append(prompt)
         message = self._email_verification_required_message(result) or "Email verification code required"
         warnings = self._dedupe_strings(list(record.warnings) + [message])
+        result_payload = self._merge_result_payload(record, result.model_dump(mode="json"))
         updated = record.model_copy(
             update={
                 "status": "needs_user_input",
@@ -4578,7 +5540,7 @@ class FileFirstOperatorService:
                 "missing_required_fields": remaining_missing,
                 "ungrounded_answers": remaining_ungrounded,
                 "low_confidence_answers": remaining_low_confidence,
-                "result": result.model_dump(mode="json"),
+                "result": result_payload,
                 "artifacts": merged_artifacts,
                 "warnings": warnings,
                 "last_error": message,
@@ -4788,11 +5750,12 @@ class FileFirstOperatorService:
                 issued_after=submit_started_at,
             )
             status = "submitted" if result.submitted else ("submission_uncertain" if result.uncertain else "submission_failed")
+            result_payload = self._merge_result_payload(record, result.model_dump(mode="json"))
             updated = record.model_copy(update={
                 "status": status,
                 "event_status": status,
                 "submit_ready": False,
-                "result": result.model_dump(mode="json"),
+                "result": result_payload,
                 "artifacts": merged_artifacts,
                 "warnings": list(record.warnings),
                 "last_error": None if result.submitted or result.uncertain else (result.message or record.last_error),
@@ -5012,12 +5975,13 @@ class FileFirstOperatorService:
             warnings = list(record.warnings)
             if preview_issue is not None and preview_issue not in warnings:
                 warnings.append(preview_issue)
+            result_payload = self._merge_result_payload(record, result.model_dump(mode='json'))
             updated = record.model_copy(update={
                 'status': status,
                 'event_status': status,
                 'submit_ready': False,
                 'preview_ready': status == 'preview_ready',
-                'result': result.model_dump(mode='json'),
+                'result': result_payload,
                 'artifacts': merged_artifacts,
                 'warnings': warnings,
                 'last_error': None if status == 'preview_ready' else preview_issue,
@@ -5502,6 +6466,13 @@ class FileFirstOperatorService:
                 "submitted_at": base_record.submitted_at or submitted_at,
                 "updated_at": utcnow_iso(),
             }
+        )
+        updated_record = self._append_review_history_event_to_record(
+            updated_record,
+            event_type="review.action.mark_submitted",
+            summary="Recorded a manual submission from the review queue.",
+            actor="operator",
+            metadata={"reason": note, "submitted_at": updated_record.submitted_at or submitted_at},
         )
         self.workspace.save_submission(updated_record)
         self.workspace.upsert_application(

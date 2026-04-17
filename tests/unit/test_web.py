@@ -260,6 +260,8 @@ async def test_json_endpoints_return_operator_data(seeded_client) -> None:
     review_item = next(item for item in queue.json()['items'] if item['application_id'] == ids['review_application_id'])
     assert review_item['classification']['board_family'] == 'greenhouse'
     assert review_item['gate']['missing_required_fields'] == ['What is your preferred start date?']
+    assert review_item['review_summary']['blocker_count'] == 1
+    assert review_item['manual_handoff']['active'] is False
 
     detail = await client.get(f'/api/applications/{ids["review_application_id"]}')
     assert detail.status_code == 200
@@ -267,6 +269,10 @@ async def test_json_endpoints_return_operator_data(seeded_client) -> None:
     assert detail_payload['application']['application_id'] == ids['review_application_id']
     assert detail_payload['questions'][0]['prompt_text'] == 'What is your preferred start date?'
     assert detail_payload['blockers']
+    assert detail_payload['summary']['blocker_count'] == 1
+    assert any(item['kind'] == 'resume_pdf' for item in detail_payload['artifacts'])
+    assert any(item['kind'] == 'evaluation_report' for item in detail_payload['artifacts'])
+    assert detail_payload['history'] == []
 
 
 @pytest.mark.asyncio
@@ -392,9 +398,43 @@ async def test_review_action_can_record_manual_submission(seeded_client) -> None
     assert submission.status == 'submitted'
     assert submission.submitted_at is not None
     assert submission.result['manual_confirmation'] is True
+    assert submission.result['review_history'][-1]['type'] == 'review.action.mark_submitted'
     assert application is not None
     assert application.status == 'Applied'
     assert not any(item['application_id'] == ids['review_application_id'] for item in queue.json()['items'])
+
+
+@pytest.mark.asyncio
+async def test_review_action_can_sync_manual_input(monkeypatch, seeded_client) -> None:
+    client, ids, _tmp_path = seeded_client
+
+    async def fake_sync(self, application_id, approve_memory=True, source='manual_handoff_sync'):
+        _ = self
+        assert application_id == ids['review_application_id']
+        assert approve_memory is True
+        assert source == 'manual_handoff_console_sync'
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'updated_count': 2,
+            'filled_blank_count': 1,
+            'corrected_answer_count': 1,
+            'remaining_blockers': [],
+            'status': 'needs_user_input',
+            'watch_state': {'active': True, 'status': 'watching'},
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._sync_manual_handoff_answers_async', fake_sync)
+
+    response = await client.post('/api/review/action', json={'application_id': ids['review_application_id'], 'action': 'sync_manual_input'})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['page_found'] is True
+    assert payload['synced_count'] == 2
+    assert payload['filled_blank_count'] == 1
+    assert payload['corrected_answer_count'] == 1
+    assert payload['remaining_blockers'] == []
 
 
 @pytest.mark.asyncio

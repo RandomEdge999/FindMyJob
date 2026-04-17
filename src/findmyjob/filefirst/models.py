@@ -276,10 +276,12 @@ class SubmissionQuestion(BaseModel):
     normalized_key: str | None = None
     question_type: str = "unknown"
     widget_type: str = "text"
+    section: str | None = None
     required: bool = False
     sensitive: bool = False
     options: list[str] = Field(default_factory=list)
     option_details: list[dict[str, Any]] = Field(default_factory=list)
+    submission_binding: dict[str, Any] = Field(default_factory=dict)
     existing_answer: str | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     confidence_reason: str | None = None
