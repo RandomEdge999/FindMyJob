@@ -14,3 +14,5 @@ Typical setup:
 python -m pip install -r requirements/playwright.txt
 python -m playwright install chromium
 ```
+
+If you are working from a fresh clone, the supported public launchers and `scripts/bootstrap_env.py` can now create `.venv312`, install the editable package, and install Chromium automatically.

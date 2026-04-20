@@ -12,6 +12,7 @@ from findmyjob.filefirst.advanced_models import load_model_router
 from findmyjob.filefirst.render import _template_bridge_details
 from findmyjob.filefirst.source_targets import SOURCE_ORDER, SUPPORTED_SOURCES, active_sources, requested_sources, scope_targets
 from findmyjob.filefirst.workspace import DEFAULT_CV, FileWorkspace
+from findmyjob.web.frontend_sync import inspect_frontend_build_readiness
 
 _SUPPORTED_SOURCE_ORDER = SOURCE_ORDER
 _SUPPORTED_SOURCES = SUPPORTED_SOURCES
@@ -171,7 +172,7 @@ def inspect_filefirst_config(workspace: Path | FileWorkspace) -> ValidationRepor
             "profile.local_user_profile",
             "Workspace is still using tracked sample candidate data.",
             detail=f"Create {profile_surface['local_path']} from {profile_surface['public_template_path']} or {profile_surface['local_template_path']}.",
-            hint="Copy `templates/user-profile.local.example.yml` to `.fmj/local-overrides/filefirst/user-profile.yml` and fill in your real local details.",
+            hint="Open the local Setup page at `/setup` to save your basic profile, or copy `templates/user-profile.local.example.yml` to `.fmj/local-overrides/filefirst/user-profile.yml` for manual editing.",
         )
     elif profile_surface["mode"] == "local_user_profile":
         report.add(
@@ -356,6 +357,15 @@ def inspect_filefirst_readiness(
                 "Typst is still the launch renderer even though an HTML-to-PDF compatibility override is configured.",
                 detail=find_typst_executable() or "not installed",
             )
+
+    frontend_build = inspect_frontend_build_readiness(ws.root)
+    report.add(
+        frontend_build.status,
+        "runtime.frontend.bundle",
+        frontend_build.summary,
+        detail=frontend_build.detail,
+        hint=frontend_build.hint,
+    )
 
     if check_browser:
         playwright = _inspect_playwright()
@@ -641,22 +651,31 @@ def inspect_filefirst_launch_acceptance(
         "Contact facts are available for apply flows." if _contact_ready(ws) else "Contact facts for apply flows are missing.",
     )
     profile_surface = ws.user_profile_surface()
+    if profile_surface["mode"] == "sample_mode":
+        profile_detail = (
+            f"{profile_surface['local_path']} :: next step: use /setup to save your real basic profile before treating the workspace as launch-ready."
+        )
+    elif profile_surface["mode"] == "local_user_profile":
+        profile_detail = profile_surface["local_path"]
+    else:
+        profile_detail = ", ".join(profile_surface["active_advanced_paths"]) or profile_surface["local_path"]
     report.add(
         "pass" if profile_surface["mode"] != "sample_mode" else "fail",
         "profile.local_user_profile",
         "Local candidate profile overrides are configured for launch."
         if profile_surface["mode"] != "sample_mode"
         else "Launch certification requires local candidate data instead of the tracked sample profile.",
-        detail=(
-            profile_surface["local_path"]
-            if profile_surface["mode"] == "local_user_profile"
-            else ", ".join(profile_surface["active_advanced_paths"]) or profile_surface["local_path"]
-        ),
+        detail=profile_detail,
     )
     report.add(
         "pass" if _authorization_ready(ws) else "fail",
         "profile.authorization_facts",
         "Authorization facts are available for apply flows." if _authorization_ready(ws) else "Authorization facts for apply flows are missing.",
+        detail=(
+            None
+            if _authorization_ready(ws)
+            else "Use /setup to record your work authorization and sponsorship defaults for the active workspace."
+        ),
     )
     report.add(
         "pass" if _experience_fact_count(ws) else "warning",

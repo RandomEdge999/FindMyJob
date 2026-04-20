@@ -175,20 +175,39 @@ class ModelRouter:
                     risks.append(f"{role} profile `{profile_data.get('name')}` is not ready.")
             provider_name = str(profile_data.get('provider') or '').strip().lower()
             transport_name = str(profile_data.get('transport') or '').strip().lower()
+            # Writer role remains pinned to LM Studio local_http for latency/privacy reasons.
+            # Screening / question-answering / extractor roles may run on OpenRouter (remote_http);
+            # LM Studio is still the recommended default but no longer a hard requirement for them.
+            is_writer_role = role in {
+                ModelRole.WRITER.value,
+                ModelRole.RESUME_WRITER.value,
+                ModelRole.COVER_LETTER_WRITER.value,
+            }
+            remote_permitted = (not is_writer_role) and (transport_name == 'remote_http')
             if provider_name != LMSTUDIO_PROVIDER:
-                issues.append('launch contract requires LM Studio-local provider bindings')
-                if role in required_roles:
-                    role_status = 'fail'
-                    risks.append(f"{role} profile `{profile_data.get('name')}` is not using LM Studio.")
+                if remote_permitted:
+                    issues.append('launch contract recommends LM Studio-local provider; remote_http provider accepted for this role')
+                    if role_status == 'pass':
+                        role_status = 'warning'
                 else:
-                    role_status = 'warning'
+                    issues.append('launch contract requires LM Studio-local provider bindings')
+                    if role in required_roles:
+                        role_status = 'fail'
+                        risks.append(f"{role} profile `{profile_data.get('name')}` is not using LM Studio.")
+                    else:
+                        role_status = 'warning'
             if transport_name != 'local_http':
-                issues.append('launch contract requires LM Studio local_http transport')
-                if role in required_roles:
-                    role_status = 'fail'
-                    risks.append(f"{role} profile `{profile_data.get('name')}` is not using local_http transport.")
+                if remote_permitted:
+                    issues.append('launch contract recommends LM Studio local_http transport; remote_http accepted for this role')
+                    if role_status == 'pass':
+                        role_status = 'warning'
                 else:
-                    role_status = 'warning'
+                    issues.append('launch contract requires LM Studio local_http transport')
+                    if role in required_roles:
+                        role_status = 'fail'
+                        risks.append(f"{role} profile `{profile_data.get('name')}` is not using local_http transport.")
+                    else:
+                        role_status = 'warning'
 
             roles.append(
                 ModelLaunchRoleStatus(
@@ -364,6 +383,39 @@ class ModelRouter:
             response.raise_for_status()
             payload = response.json()
         return lmstudio_available_model_ids(payload)
+
+    async def discover_remote_http_models(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+    ) -> list[str]:
+        """Fetch an OpenAI-compatible /v1/models catalog from a remote provider (OpenRouter, etc.).
+
+        Returns a list of model ids. Raises httpx errors on network failure so the
+        caller can render a precise UI error instead of showing an empty list.
+        """
+        headers: dict[str, str] = {}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+        target = base_url.rstrip('/')
+        async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
+            response = await client.get(f"{target}/models")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError('remote model catalog response was not an object')
+        data = payload.get('data')
+        if not isinstance(data, list):
+            raise RuntimeError('remote model catalog missing data array')
+        ids: list[str] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            model_id = str(entry.get('id') or '').strip()
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        return ids
 
     async def test_profile(self, profile: ModelProfile) -> dict[str, Any]:
         inspection = self._inspect_profile(profile)

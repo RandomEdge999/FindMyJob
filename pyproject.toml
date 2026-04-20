@@ -5,13 +5,29 @@ build-backend = "hatchling.build"
 [project]
 name = "findmyjob"
 dynamic = ["version"]
-description = "Terminal-first, compliance-first job discovery and application assistant."
+description = "Local-first job application operator with reviewable discovery, drafting, submission, and tracking workflows."
 readme = "README.md"
-requires-python = ">=3.12"
-license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+license-files = ["LICENSE", "NOTICE"]
 authors = [
-  { name = "Find My Job Contributors" }
+  { name = "Aleem (RandomEdge999)" }
 ]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Framework :: FastAPI",
+  "Intended Audience :: Developers",
+  "Intended Audience :: End Users/Desktop",
+  "License :: Other/Proprietary License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Office/Business",
+]
+keywords = ["job-search", "automation", "ats", "fastapi", "react", "playwright"]
+urls = { Homepage = "https://github.com/RandomEdge999/FindMyJob", Repository = "https://github.com/RandomEdge999/FindMyJob", Issues = "https://github.com/RandomEdge999/FindMyJob/issues" }
 dependencies = [
   "alembic>=1.13.2",
   "anyio>=4.4.0",
@@ -61,14 +77,23 @@ path = "src/findmyjob/__init__.py"
 
 [tool.hatch.build.targets.sdist]
 include = [
+  "/install.cmd",
+  "/install.ps1",
+  "/install.sh",
+  "/LICENSE",
+  "/NOTICE",
   "/README.md",
   "/alembic",
   "/alembic.ini",
   "/docs/release.md",
   "/pyproject.toml",
   "/requirements",
+  "/scripts/bootstrap_env.py",
   "/scripts/publish_audit.py",
   "/scripts/verify_release.py",
+  "/start.bat",
+  "/start.ps1",
+  "/start.sh",
   "/src/findmyjob",
   "/templates/user-profile.local.example.yml",
   "/templates/typst",

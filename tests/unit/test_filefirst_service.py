@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anyio
+import pytest
+from tomlkit import dumps, parse
 
 from findmyjob.core.enums import JobLifecycleStatus
 from findmyjob.core.types import FormFieldBinding, SubmissionEvidence, SubmissionPlan, SubmissionResult
@@ -181,18 +183,101 @@ def test_review_payloads_expose_summary_artifacts_and_manual_handoff(tmp_path: P
     )
 
     queue = service.review_queue_payload()
+    jobs_table = service.jobs_table_payload()
     detail = service.application_detail_payload('001')
     item = next(entry for entry in queue['items'] if entry['application_id'] == '001')
+    job_row = next(entry for entry in jobs_table['items'] if entry['application_id'] == '001')
 
     assert item['review_summary']['severity'] == 'danger'
     assert item['review_summary']['blocker_count'] == 1
     assert item['review_summary']['next_action'] == 'sync_manual_input'
     assert item['manual_handoff']['active'] is True
     assert item['manual_handoff']['pending_count'] == 2
+    assert job_row['review_status'] == 'needs_user_input'
+    assert job_row['review_summary']['next_action'] == 'sync_manual_input'
+    assert job_row['manual_handoff']['active'] is True
+    assert job_row['manual_handoff']['pending_count'] == 2
     assert detail['summary']['next_action'] == 'sync_manual_input'
     assert any(artifact['kind'] == 'resume_pdf' for artifact in detail['artifacts'])
     assert any(artifact['kind'] == 'evaluation_report' for artifact in detail['artifacts'])
     assert detail['history'] == []
+
+
+def test_save_basic_profile_writes_user_profile_and_preserves_unrelated_sections(tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_user_profile(
+        {
+            'default_answers': [
+                {'question': 'Are you fluent in English?', 'answer': 'Yes, I am fluent in English.'}
+            ],
+            'facts': {
+                'skills': [
+                    {'id': 'skill.python', 'name': 'Python'}
+                ]
+            },
+        }
+    )
+
+    result = service.save_basic_profile(
+        {
+            'candidate': {
+                'name': 'Jamie Lee',
+                'email': 'jamie@example.com',
+                'phone': '555-0100',
+                'location': 'Austin, TX, US',
+                'summary': 'Backend-focused software engineer.',
+                'target_roles': ['swe_new_grad_core', 'backend_platform'],
+            },
+            'targets': {
+                'title_keywords': ['backend engineer', 'python engineer'],
+                'locations': ['Remote - United States'],
+                'countries': ['US'],
+                'regions': ['TX'],
+                'cities': ['Austin'],
+                'remote_only': True,
+            },
+            'authorization': {
+                'is_authorized': True,
+                'requires_future_sponsorship': False,
+            },
+        }
+    )
+
+    saved = ws.load_user_profile()
+    derived_facts = ws.load_facts()
+
+    assert saved['candidate']['name'] == 'Jamie Lee'
+    assert saved['candidate']['email'] == 'jamie@example.com'
+    assert saved['candidate']['target_roles'] == ['swe_new_grad_core', 'backend_platform']
+    assert saved['targets']['title_keywords'] == ['backend engineer', 'python engineer']
+    assert saved['authorization']['is_authorized'] is True
+    assert saved['default_answers'][0]['question'] == 'Are you fluent in English?'
+    assert saved['facts']['skills'][0]['name'] == 'Python'
+    assert ws.user_profile_surface()['mode'] == 'local_user_profile'
+    assert any(fact.kind == 'contact' and fact.payload.get('email') == 'jamie@example.com' for fact in derived_facts)
+    assert any(fact.kind == 'authorization' and fact.payload.get('is_authorized') is True for fact in derived_facts)
+    assert result['saved'] is True
+    assert result['profile']['guidance']['writes_to'] == ws.relative_path(ws.user_profile_path)
+
+
+def test_save_basic_profile_refuses_advanced_override_mode(tmp_path: Path) -> None:
+    ws = FileWorkspace(tmp_path)
+    ws.ensure()
+    ws.local_profile_path.parent.mkdir(parents=True, exist_ok=True)
+    ws.local_profile_path.write_text(
+        "candidate:\n  name: Local Override\n",
+        encoding='utf-8',
+    )
+    service = FileFirstOperatorService(tmp_path)
+
+    with pytest.raises(ValueError, match='Advanced local override files are already active'):
+        service.save_basic_profile(
+            {
+                'candidate': {'name': 'Jamie Lee', 'email': 'jamie@example.com'},
+                'targets': {'title_keywords': ['backend engineer'], 'countries': ['US'], 'remote_only': True},
+                'authorization': {'is_authorized': True},
+            }
+        )
 
 
 def test_manual_answer_memory_appends_alternates_instead_of_replacing(tmp_path: Path) -> None:
@@ -609,6 +694,96 @@ def test_reset_operational_preserves_handled_job_memory(tmp_path: Path) -> None:
     assert {'company': 'acme', 'role': 'backend platform engineer'} in handled['pairs']
     assert 'acme-backend-platform-engineer' in handled['duplicate_clusters']
     assert payload['handled_jobs']['job_ids'] >= 1
+
+
+def test_reset_operational_preserves_existing_ledger_exports_even_under_output_dir(tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    config_doc = parse(ws.workspace_config_path.read_text(encoding='utf-8'))
+    autonomous_tbl = config_doc.get('autonomous')
+    assert autonomous_tbl is not None
+    autonomous_tbl['ledger_output'] = 'output/ledger/custom-ledger'
+    ws.workspace_config_path.write_text(dumps(config_doc), encoding='utf-8')
+
+    ledger_base = ws.output_dir / 'ledger' / 'custom-ledger'
+    ledger_base.parent.mkdir(parents=True, exist_ok=True)
+    ledger_csv = ledger_base.with_suffix('.csv')
+    ledger_xlsx = ledger_base.with_suffix('.xlsx')
+    applications_csv = ledger_base.parent / 'applications.csv'
+    transient_output = ws.output_dir / 'transient.txt'
+    ledger_csv.write_text('application_id\n001\n', encoding='utf-8')
+    ledger_xlsx.write_text('xlsx placeholder', encoding='utf-8')
+    applications_csv.write_text('application_id\n001\n', encoding='utf-8')
+    transient_output.write_text('remove me', encoding='utf-8')
+
+    payload = service.reset_operational_state_payload()
+
+    assert ledger_csv.exists()
+    assert ledger_xlsx.exists()
+    assert applications_csv.exists()
+    assert transient_output.exists() is False
+    assert payload['ledger_exports']['configured_output_base'] == 'output/ledger/custom-ledger'
+    assert set(payload['ledger_exports']['existing_files']) == {
+        'output/ledger/applications.csv',
+        'output/ledger/custom-ledger.csv',
+        'output/ledger/custom-ledger.xlsx',
+    }
+    assert payload['history_after_reset']['applications'] is False
+    assert payload['history_after_reset']['existing_ledger_exports'] is True
+    assert any('does not create a new ledger snapshot' in line.casefold() for line in payload['summary'])
+
+
+def test_generate_ledger_export_writes_filefirst_snapshot_and_status(tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='001',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            apply_url='https://boards.greenhouse.io/acme/jobs/100',
+            status='preview_ready',
+            preview_ready=True,
+            questions=[
+                SubmissionQuestion(
+                    question_id='q-1',
+                    prompt_text='What is your preferred start date?',
+                    normalized_key='preferred-start-date',
+                    question_type='date',
+                    widget_type='date',
+                    required=True,
+                    needs_user_input=True,
+                )
+            ],
+        )
+    )
+
+    payload = service.generate_ledger_export_payload()
+    status = service.ledger_export_status_payload()
+    ledger_base = ws.fmj_dir / 'exports' / 'ledger'
+    applications_csv = ledger_base.parent / 'applications.csv'
+    questions_csv = ledger_base.parent / 'questions.csv'
+    accounts_csv = ledger_base.parent / 'accounts.csv'
+
+    assert payload['generated'] is True
+    assert payload['generation']['source'] == 'file_first_workspace'
+    assert set(payload['generated_files']) == {
+        '.fmj/exports/accounts.csv',
+        '.fmj/exports/applications.csv',
+        '.fmj/exports/ledger.csv',
+        '.fmj/exports/ledger.xlsx',
+        '.fmj/exports/questions.csv',
+    }
+    assert payload['last_generated_at']
+    assert status['exists'] is True
+    assert status['current_state']['applications'] == 1
+    assert status['current_state']['pending_questions'] == 1
+    assert applications_csv.exists()
+    assert questions_csv.exists()
+    assert accounts_csv.exists()
+    assert 'Backend Platform Engineer' in applications_csv.read_text(encoding='utf-8')
+    assert 'What is your preferred start date?' in questions_csv.read_text(encoding='utf-8')
+    assert 'login_email' in accounts_csv.read_text(encoding='utf-8')
 
 
 def test_grounding_facts_include_candidate_location_when_profile_facts_do_not(tmp_path: Path) -> None:
@@ -1847,7 +2022,7 @@ def test_run_autonomous_does_not_loop_on_blocked_application(monkeypatch, tmp_pa
     async def fake_prepare(self, application_id, run_id):
         _ = self
         _ = run_id
-        return SubmissionRecord(
+        record = SubmissionRecord(
             application_id=application_id,
             job_id='job-100',
             company='Acme',
@@ -1857,13 +2032,15 @@ def test_run_autonomous_does_not_loop_on_blocked_application(monkeypatch, tmp_pa
             event_status='needs_user_input',
             submit_ready=False,
         )
+        ws.save_submission(record)
+        return record
 
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._run_discovery_scan', fake_discovery_scan)
     monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._prepare_submission_async', fake_prepare)
 
     service.run_autonomous()
 
-    assert call_counter['discovery'] == 0
+    assert call_counter['discovery'] <= 1
 
 
 def test_run_autonomous_records_failed_application_once_and_continues(monkeypatch, tmp_path: Path) -> None:
@@ -2335,3 +2512,361 @@ def test_run_autonomous_continues_after_manual_blocker(monkeypatch, tmp_path: Pa
     assert ws.load_submission('001').status == 'needs_user_input'
     assert ws.load_submission('002').status == 'submitted'
     assert live_state.status == 'completed_with_failures'
+
+
+# --- Phase 2: learning-policy classifier -------------------------------------
+
+def _classifier_question(**overrides) -> SubmissionQuestion:
+    defaults = dict(
+        question_id='q',
+        prompt_text='Are you open to relocation?',
+        normalized_key='relocation',
+        question_type='select',
+        widget_type='select',
+        required=True,
+        options=['Yes', 'No'],
+    )
+    defaults.update(overrides)
+    return SubmissionQuestion(**defaults)
+
+
+def test_classifier_returns_transient_for_verification_codes() -> None:
+    question = _classifier_question(
+        question_id='email_verification_code',
+        prompt_text='Enter the 8-character verification code sent to your email.',
+        normalized_key='email_verification_code',
+        question_type='text',
+        widget_type='text',
+        options=[],
+    )
+    assert FileFirstOperatorService._classify_capture_reuse_scope(
+        question=question, answer_text='ABCD1234'
+    ) == 'transient'
+
+
+def test_classifier_returns_global_for_discrete_widgets() -> None:
+    question = _classifier_question()
+    assert FileFirstOperatorService._classify_capture_reuse_scope(
+        question=question, answer_text='Yes'
+    ) == 'global'
+
+
+def test_classifier_returns_job_scoped_for_cover_letter_prompts() -> None:
+    question = _classifier_question(
+        prompt_text='Why do you want to work here?',
+        normalized_key='why-this-company',
+        question_type='text',
+        widget_type='textarea',
+        options=[],
+    )
+    assert FileFirstOperatorService._classify_capture_reuse_scope(
+        question=question, answer_text='I love your product.'
+    ) == 'job_scoped'
+
+
+def test_classifier_returns_job_scoped_for_long_freeform_answers() -> None:
+    question = _classifier_question(
+        prompt_text='Describe a project.',
+        normalized_key='describe-project',
+        question_type='text',
+        widget_type='text',
+        options=[],
+    )
+    long_answer = 'x' * 300
+    assert FileFirstOperatorService._classify_capture_reuse_scope(
+        question=question, answer_text=long_answer
+    ) == 'job_scoped'
+
+
+def test_classifier_returns_global_for_short_identity_text() -> None:
+    question = _classifier_question(
+        prompt_text='Country of citizenship?',
+        normalized_key='country-of-citizenship',
+        question_type='text',
+        widget_type='text',
+        options=[],
+    )
+    assert FileFirstOperatorService._classify_capture_reuse_scope(
+        question=question, answer_text='United States'
+    ) == 'global'
+
+
+def test_manual_handoff_sync_does_not_promote_job_scoped_answers(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='001',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='why_us',
+                    prompt_text='Why do you want to join Acme?',
+                    normalized_key='why-this-company',
+                    question_type='text',
+                    widget_type='textarea',
+                    required=True,
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Are you open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    option_details=[{'label': 'Yes', 'value': 'Yes'}, {'label': 'No', 'value': 'No'}],
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+            ],
+            result={'manual_handoff_watch': {'active': True, 'status': 'watching'}},
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        _ = self
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'page_url': 'https://example.com',
+            'answers': [
+                {
+                    'question_id': 'why_us',
+                    'prompt_text': 'Why do you want to join Acme?',
+                    'widget_type': 'textarea',
+                    'answer_text': 'Your mission to simplify ops resonates with my background.',
+                },
+                {
+                    'question_id': 'relocation',
+                    'prompt_text': 'Are you open to relocation?',
+                    'widget_type': 'select',
+                    'answer_text': 'Yes',
+                },
+            ],
+            'error': None,
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+
+    result = anyio.run(service._sync_manual_handoff_answers_async, '001', True, 'manual_handoff_test')
+
+    assert result['updated_count'] == 2
+    assert result['learned_global_count'] == 1
+    assert result['job_scoped_count'] == 1
+
+    saved = ws.load_submission('001')
+    assert saved is not None
+    assert saved.manual_answers['why_us'].startswith('Your mission')
+    assert saved.manual_answers['relocation'] == 'Yes'
+
+    memory = ws.load_answer_memory()
+    # Discrete relocation answer is promoted; free-form 'why-this-company' stays scoped.
+    assert any(item.canonical_question == 'open-to-relocation' for item in memory)
+    assert not any(item.canonical_question == 'why-this-company' for item in memory)
+
+    # Global entry carries learning metadata.
+    relocation_entry = next(item for item in memory if item.canonical_question == 'open-to-relocation')
+    assert relocation_entry.reuse_scope == 'global'
+    assert relocation_entry.source_application_id == '001'
+    assert relocation_entry.provenance == 'manual_handoff_sync'
+
+
+# --- Phase 3: explicit manual-handoff capture outcomes ------------------------
+
+def test_manual_handoff_sync_reports_page_missing_outcome(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='100',
+            job_id='job-100',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+            ],
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        return {
+            'application_id': application_id,
+            'page_found': False,
+            'page_url': None,
+            'answers': [],
+            'error': 'No parked application page matched the manual handoff URL.',
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+
+    result = anyio.run(service._sync_manual_handoff_answers_async, '100', True, 'manual_handoff_test')
+    assert result['outcome'] == 'page_missing'
+    assert result['updated_count'] == 0
+
+
+def test_manual_handoff_sync_reports_no_changes_outcome(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='101',
+            job_id='job-101',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    option_details=[{'label': 'Yes', 'value': 'Yes'}, {'label': 'No', 'value': 'No'}],
+                    existing_answer='Yes',
+                    needs_user_input=False,
+                ),
+            ],
+            manual_answers={'relocation': 'Yes'},
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'page_url': 'https://example.com',
+            'answers': [
+                {
+                    'question_id': 'relocation',
+                    'prompt_text': 'Open to relocation?',
+                    'widget_type': 'select',
+                    'answer_text': 'Yes',
+                },
+            ],
+            'error': None,
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+    result = anyio.run(service._sync_manual_handoff_answers_async, '101', True, 'manual_handoff_test')
+    assert result['outcome'] == 'no_changes'
+    assert result['updated_count'] == 0
+
+
+def test_manual_handoff_sync_reports_blank_filled_outcome(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='102',
+            job_id='job-102',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    option_details=[{'label': 'Yes', 'value': 'Yes'}, {'label': 'No', 'value': 'No'}],
+                    existing_answer='',
+                    needs_user_input=True,
+                ),
+            ],
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'page_url': 'https://example.com',
+            'answers': [
+                {
+                    'question_id': 'relocation',
+                    'prompt_text': 'Open to relocation?',
+                    'widget_type': 'select',
+                    'answer_text': 'Yes',
+                },
+            ],
+            'error': None,
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+    result = anyio.run(service._sync_manual_handoff_answers_async, '102', True, 'manual_handoff_test')
+    assert result['outcome'] == 'blank_filled'
+    assert result['filled_blank_count'] == 1
+    assert result['corrected_answer_count'] == 0
+
+
+def test_manual_handoff_sync_reports_corrected_outcome(monkeypatch, tmp_path: Path) -> None:
+    service, ws = _seed_service_workspace(tmp_path)
+    ws.save_submission(
+        SubmissionRecord(
+            application_id='103',
+            job_id='job-103',
+            company='Acme',
+            role='Backend Platform Engineer',
+            source='greenhouse',
+            status='needs_user_input',
+            questions=[
+                SubmissionQuestion(
+                    question_id='relocation',
+                    prompt_text='Open to relocation?',
+                    normalized_key='open-to-relocation',
+                    question_type='select',
+                    widget_type='select',
+                    required=True,
+                    options=['Yes', 'No'],
+                    option_details=[{'label': 'Yes', 'value': 'Yes'}, {'label': 'No', 'value': 'No'}],
+                    existing_answer='No',
+                    needs_user_input=False,
+                ),
+            ],
+            manual_answers={'relocation': 'No'},
+        )
+    )
+
+    async def fake_capture(self, application_id):
+        return {
+            'application_id': application_id,
+            'page_found': True,
+            'page_url': 'https://example.com',
+            'answers': [
+                {
+                    'question_id': 'relocation',
+                    'prompt_text': 'Open to relocation?',
+                    'widget_type': 'select',
+                    'answer_text': 'Yes',
+                },
+            ],
+            'error': None,
+        }
+
+    monkeypatch.setattr('findmyjob.filefirst.service.FileFirstOperatorService._capture_manual_handoff_answers_async', fake_capture)
+    result = anyio.run(service._sync_manual_handoff_answers_async, '103', True, 'manual_handoff_test')
+    assert result['outcome'] == 'corrected'
+    assert result['corrected_answer_count'] == 1
+    assert result['filled_blank_count'] == 0

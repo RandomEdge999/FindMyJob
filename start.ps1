@@ -6,7 +6,7 @@ param(
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 function Resolve-Python([string]$RepoRoot) {
     $candidates = @(
@@ -27,6 +27,51 @@ function Resolve-Python([string]$RepoRoot) {
         }
     }
     throw "Python 3.12 was not found in .venv312 or .venv. Create a repo-local Python 3.12 virtual environment first."
+}
+
+function Resolve-BootstrapPython([string]$RepoRoot) {
+    $bootstrapScript = Join-Path $RepoRoot "scripts\bootstrap_env.py"
+    $candidates = @(
+        @{ Command = "py"; PrefixArgs = @("-3.12") },
+        @{ Command = "python"; PrefixArgs = @() },
+        @{ Command = "python3.12"; PrefixArgs = @() }
+    )
+
+    foreach ($candidate in $candidates) {
+        if (-not (Get-Command $candidate.Command -ErrorAction SilentlyContinue)) {
+            continue
+        }
+        & $candidate.Command @($candidate.PrefixArgs + @("-c", "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)")) 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            continue
+        }
+        return @($candidate.Command) + $candidate.PrefixArgs + @($bootstrapScript, "--project-root", $RepoRoot)
+    }
+
+    throw "Python 3.12 was not found. Install Python 3.12 or create .venv312 manually before launching FindMyJob."
+}
+
+function Ensure-RepoEnvironment([string]$RepoRoot) {
+    $bootstrapScript = Join-Path $RepoRoot "scripts\bootstrap_env.py"
+    try {
+        $repoPython = Resolve-Python $RepoRoot
+        & $repoPython $bootstrapScript --project-root $RepoRoot
+        if ($LASTEXITCODE -ne 0) {
+            throw "Repo-local bootstrap failed."
+        }
+        return (Resolve-Python $RepoRoot)
+    } catch {
+        if ($_ -match "Unsupported Python") {
+            throw
+        }
+    }
+
+    $bootstrapCommand = Resolve-BootstrapPython $RepoRoot
+    & $bootstrapCommand[0] @($bootstrapCommand[1..($bootstrapCommand.Length - 1)])
+    if ($LASTEXITCODE -ne 0) {
+        throw "Automatic repo-local bootstrap failed. Create .venv312 manually or run scripts\bootstrap_env.py with Python 3.12."
+    }
+    return (Resolve-Python $RepoRoot)
 }
 
 function Test-TruthyEnv([string]$Value) {
@@ -57,7 +102,7 @@ with socket.socket(family, socket.SOCK_STREAM) as probe:
 }
 
 $repoRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$script:PythonBin = Resolve-Python $repoRoot
+$script:PythonBin = Ensure-RepoEnvironment $repoRoot
 $preflightScript = Join-Path $repoRoot "scripts\lmstudio_preflight.py"
 
 $bindHost = if ($env:FMJ_HOST) { $env:FMJ_HOST } else { "127.0.0.1" }
@@ -72,7 +117,7 @@ if (Test-TruthyEnv $env:FMJ_OPEN_BROWSER) {
 
 $requireLmStudioPreflight = Test-TruthyEnv $env:FMJ_REQUIRE_LMSTUDIO_PREFLIGHT
 
-& $PythonBin $preflightScript --workspace $repoRoot
+& $PythonBin $preflightScript --workspace $repoRoot 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     if ($requireLmStudioPreflight) {
         throw "LM Studio preflight failed. Start LM Studio, load the configured models, then retry."
@@ -86,6 +131,19 @@ if (-not (Test-PortAvailable -BindHost $bindHost -BindPort $bindPort)) {
 
 if ($SkipFrontendBuild) {
     $env:SKIP_FRONTEND_BUILD = "1"
+}
+
+$buildArguments = @(
+    "-m", "findmyjob", "build",
+    "--workspace", $repoRoot
+)
+if ($SkipFrontendBuild) {
+    $buildArguments += "--skip-frontend-build"
+}
+
+& $PythonBin @buildArguments
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
 }
 
 $existingPythonPath = [string]$env:PYTHONPATH

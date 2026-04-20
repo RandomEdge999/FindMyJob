@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from findmyjob.web.frontend_sync import frontend_bundle_status, sync_frontend_bundle
+from findmyjob.web.frontend_sync import frontend_bundle_status, inspect_frontend_build_readiness, sync_frontend_bundle
 
 
 def _write_file(path: Path, content: str = "x") -> Path:
@@ -37,7 +37,6 @@ def _seed_frontend_tree(tmp_path: Path, *, fresh: bool) -> tuple[Path, Path]:
     _touch_with_mtime(dist_dir / "index.html", output_time, "<html></html>\n")
     _touch_with_mtime(dist_dir / "assets" / "index.js", output_time, "console.log('built')\n")
     _touch_with_mtime(dist_dir / "assets" / "index.css", output_time, "body{}\n")
-    _touch_with_mtime(dist_dir / "assets" / "runtime-fixes.js", output_time, "window.__ok = true\n")
     return frontend_root, dist_dir
 
 
@@ -69,7 +68,6 @@ def test_frontend_sync_rebuilds_stale_dist(tmp_path: Path) -> None:
             _touch_with_mtime(dist_dir / "index.html", fresh_time, "<html>fresh</html>\n")
             _touch_with_mtime(dist_dir / "assets" / "index.js", fresh_time, "console.log('fresh')\n")
             _touch_with_mtime(dist_dir / "assets" / "index.css", fresh_time, "body{color:black}\n")
-            _touch_with_mtime(dist_dir / "assets" / "runtime-fixes.js", fresh_time, "window.__fresh = true\n")
         return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     result = sync_frontend_bundle(
@@ -92,7 +90,6 @@ def test_frontend_sync_accepts_older_static_assets_after_a_recent_build(tmp_path
     _touch_with_mtime(dist_dir / "index.html", 400, "<html>fresh</html>\n")
     _touch_with_mtime(dist_dir / "assets" / "index.js", 400, "console.log('fresh')\n")
     _touch_with_mtime(dist_dir / "assets" / "index.css", 150, "body{}\n")
-    _touch_with_mtime(dist_dir / "assets" / "runtime-fixes.js", 150, "window.__ok = true\n")
 
     status = frontend_bundle_status(tmp_path)
 
@@ -109,6 +106,32 @@ def test_frontend_sync_fails_when_stale_and_node_toolchain_missing(tmp_path: Pat
             run_command=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("build should not run")),
             which=lambda name: None,
         )
+
+
+def test_frontend_build_readiness_warns_when_stale_dist_can_be_rebuilt(tmp_path: Path) -> None:
+    _seed_frontend_tree(tmp_path, fresh=False)
+
+    readiness = inspect_frontend_build_readiness(
+        tmp_path,
+        which=lambda name: f"C:/tools/{name}.exe",
+    )
+
+    assert readiness.status == "warning"
+    assert readiness.bundle_status.reason == "stale_dist"
+    assert readiness.hint == "Run `fmj build` to refresh the local web frontend before launch."
+
+
+def test_frontend_build_readiness_blocks_when_stale_dist_needs_missing_toolchain(tmp_path: Path) -> None:
+    _seed_frontend_tree(tmp_path, fresh=False)
+
+    readiness = inspect_frontend_build_readiness(
+        tmp_path,
+        which=lambda name: None,
+    )
+
+    assert readiness.status == "blocked"
+    assert readiness.bundle_status.reason == "stale_dist"
+    assert "Node.js/npm" in readiness.summary
 
 
 def test_frontend_sync_noops_when_frontend_sources_are_unavailable(tmp_path: Path) -> None:

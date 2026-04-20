@@ -36,6 +36,38 @@ class QuestionAnswerRequest(BaseModel):
     auto_retry: bool = True
 
 
+class BasicProfileCandidateRequest(BaseModel):
+    name: str = ""
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    linkedin: str | None = None
+    github: str | None = None
+    website: str | None = None
+    summary: str | None = None
+    target_roles: list[str] = Field(default_factory=list)
+
+
+class BasicProfileTargetsRequest(BaseModel):
+    title_keywords: list[str] = Field(default_factory=list)
+    locations: list[str] = Field(default_factory=list)
+    countries: list[str] = Field(default_factory=list)
+    regions: list[str] = Field(default_factory=list)
+    cities: list[str] = Field(default_factory=list)
+    remote_only: bool = True
+
+
+class BasicProfileAuthorizationRequest(BaseModel):
+    is_authorized: bool | None = None
+    requires_future_sponsorship: bool | None = None
+
+
+class BasicProfileRequest(BaseModel):
+    candidate: BasicProfileCandidateRequest = Field(default_factory=BasicProfileCandidateRequest)
+    targets: BasicProfileTargetsRequest = Field(default_factory=BasicProfileTargetsRequest)
+    authorization: BasicProfileAuthorizationRequest = Field(default_factory=BasicProfileAuthorizationRequest)
+
+
 class GreenhouseSettingsRequest(BaseModel):
     enabled: bool = True
     submit_enabled: bool = False
@@ -91,6 +123,8 @@ class SmokeAllowlistRequest(BaseModel):
 class ChatGPTDraftingSettingsRequest(BaseModel):
     enabled: bool = True
     gpt_url: str
+    screening_url: str | None = ""
+    qa_url: str | None = ""
     completion_start_marker: str = "[[PDF_OUTPUT_READY]]"
     completion_end_marker: str = "[[PDF_OUTPUT_COMPLETE]]"
     profile_dir: str = ".fmj/browser/chatgpt-profile"
@@ -147,6 +181,19 @@ class ModelProfileRequest(BaseModel):
     local: bool = False
     command: list[str] = Field(default_factory=list)
     working_dir: str | None = None
+
+
+class ModelFamilyRequest(BaseModel):
+    family: str
+    model: str | None = None
+    base_url: str | None = None
+    provider: str | None = None
+    transport: str | None = None
+    api_key_env: str | None = None
+
+
+class SettingsImportRequest(BaseModel):
+    bundle: dict[str, Any] = Field(default_factory=dict)
 
 
 class RuntimeModelRequest(BaseModel):
@@ -296,6 +343,39 @@ def setup_readiness(request: Request) -> dict:
     return _console(request).setup_readiness_payload()
 
 
+@router.get("/profile/basic")
+def basic_profile_get(request: Request) -> dict:
+    return _console(request).basic_profile_payload()
+
+
+@router.put("/profile/basic")
+def basic_profile_save(request: Request, payload: BasicProfileRequest) -> dict:
+    try:
+        return _console(request).save_basic_profile(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/workspace/reset-operational/contract")
+def workspace_reset_operational_contract(request: Request) -> dict:
+    return _console(request).reset_operational_state_contract_payload()
+
+
+@router.get("/workspace/ledger-export")
+def workspace_ledger_export_status(request: Request) -> dict:
+    return _console(request).ledger_export_status_payload()
+
+
+@router.post("/workspace/ledger-export")
+def workspace_ledger_export(request: Request) -> dict:
+    try:
+        return _console(request).generate_ledger_export_payload()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/workspace/reset-operational")
 def workspace_reset_operational(request: Request) -> dict:
     return _console(request).reset_operational_state_payload()
@@ -314,6 +394,11 @@ def daily_run(request: Request) -> dict:
 @router.get("/autonomous/status")
 def autonomous_status_get(request: Request) -> dict:
     return _console(request).autonomous_status_payload()
+
+
+@router.get("/release/posture")
+def release_posture(request: Request) -> dict:
+    return _console(request).release_posture_payload()
 
 
 @router.get("/rehearsal")
@@ -407,6 +492,19 @@ def settings_get(request: Request) -> dict:
     return _console(request).settings_payload()
 
 
+@router.get("/settings/export")
+def settings_export(request: Request) -> dict:
+    return _console(request).export_non_personal_settings_payload()
+
+
+@router.post("/settings/import")
+def settings_import(request: Request, payload: SettingsImportRequest) -> dict:
+    try:
+        return _console(request).import_non_personal_settings_payload(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/chatgpt-drafting/status")
 def chatgpt_drafting_status(request: Request) -> dict:
     return _console(request).chatgpt_drafting_status_payload()
@@ -481,6 +579,14 @@ def settings_smoke_allowlist(request: Request, payload: SmokeAllowlistRequest) -
 def settings_models(request: Request, payload: ModelProfileRequest) -> dict:
     try:
         return _console(request).save_model_profile(payload.name, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/settings/models/family")
+def settings_models_family(request: Request, payload: ModelFamilyRequest) -> dict:
+    try:
+        return _console(request).save_model_family(payload.family, payload.model_dump())
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -575,26 +681,81 @@ def settings_models_available(
     api_key_env: str | None = None,
     profile_name: str | None = None,
 ) -> dict:
-    """Return the live LM Studio model catalog for the launch runtime."""
+    """Return the live model catalog for the launch runtime.
+
+    LM Studio (local_http) remains the default. If the caller identifies a remote_http
+    provider (e.g. OpenRouter), the catalog is fetched from that provider using its
+    configured API key.
+    """
+    console = _console(request)
+    resolved_api_key_env = api_key_env
     if profile_name:
         try:
-            router = _console(request).model_router()
-            if router is not None:
-                profile = router.get_profile(name=profile_name)
+            mrouter = console.model_router()
+            if mrouter is not None:
+                profile = mrouter.get_profile(name=profile_name)
                 provider = provider or profile.provider
                 transport = transport or profile.transport
                 base_url = base_url or profile.base_url
-                api_key_env = api_key_env or profile.api_key_env
+                resolved_api_key_env = resolved_api_key_env or profile.api_key_env
         except ValueError:
             pass
     resolved_base_url = str(base_url or "").strip()
     resolved_transport = str(transport or "").strip().lower()
-    resolved_provider = LMSTUDIO_PROVIDER
+    resolved_provider = str(provider or "").strip().lower()
+
+    if resolved_transport == "remote_http":
+        # OpenRouter and other OpenAI-compatible remote providers.
+        from findmyjob.security.secrets import get_secret
+
+        target_base_url = resolved_base_url or "https://openrouter.ai/api/v1"
+        api_key: str | None = None
+        api_key_configured = False
+        if resolved_api_key_env:
+            api_key_configured = True
+            try:
+                api_key = get_secret(resolved_api_key_env)
+            except Exception:
+                api_key = None
+        try:
+            import anyio as _anyio
+            mrouter = console.model_router()
+            if mrouter is None:
+                raise RuntimeError("model router not configured")
+            ids = _anyio.run(
+                lambda: mrouter.discover_remote_http_models(base_url=target_base_url, api_key=api_key)
+            )
+            models = [{"id": mid, "name": mid} for mid in ids]
+            return {
+                "models": models,
+                "count": len(models),
+                "live": True,
+                "source": resolved_provider or "openrouter",
+                "key_scoped": bool(api_key),
+                "api_key_configured": api_key_configured,
+                "cached": False,
+                "transport": "remote_http",
+                "base_url": target_base_url,
+            }
+        except Exception as exc:
+            return {
+                "models": [],
+                "count": 0,
+                "live": True,
+                "source": resolved_provider or "openrouter",
+                "key_scoped": False,
+                "api_key_configured": api_key_configured,
+                "cached": False,
+                "transport": "remote_http",
+                "base_url": target_base_url,
+                "error": str(exc),
+            }
+
     if resolved_transport and resolved_transport != "local_http":
         resolved_transport = "local_http"
     return _fetch_local_http_models(
         base_url=resolved_base_url or LMSTUDIO_DEFAULT_HOST,
-        provider=resolved_provider,
+        provider=LMSTUDIO_PROVIDER,
     )
 
 

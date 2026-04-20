@@ -113,6 +113,11 @@ class AnswerMemoryEntry(BaseModel):
     grounded_fact_ids: list[str] = Field(default_factory=list)
     approved: bool = True
     created_at: str = Field(default_factory=utcnow_iso)
+    # Learning-policy metadata (Phase 2). Backward-compatible optional fields.
+    reuse_scope: Literal["global", "job_scoped", "transient"] = "global"
+    provenance: str = "operator"
+    source_application_id: str | None = None
+    updated_at: str | None = None
 
 
 class SourceBoardConfig(BaseModel):

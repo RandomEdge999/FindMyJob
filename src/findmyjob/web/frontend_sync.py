@@ -24,11 +24,23 @@ class FrontendBundleStatus:
     dist_dir: Path
 
 
+@dataclass(slots=True)
+class FrontendBuildReadiness:
+    status: str
+    summary: str
+    detail: str
+    hint: str | None
+    bundle_status: FrontendBundleStatus
+    node_available: bool
+    npm_available: bool
+
+
 _REQUIRED_DIST_FILES = (
     "index.html",
-    "assets/index.js",
-    "assets/index.css",
-    "assets/runtime-fixes.js",
+)
+_REQUIRED_DIST_GLOBS = (
+    "assets/index*.js",
+    "assets/index*.css",
 )
 _OPTIONAL_INPUT_FILES = (
     "build.mjs",
@@ -85,6 +97,21 @@ def frontend_bundle_status(base_dir: Path | None = None) -> FrontendBundleStatus
             dist_dir=dist_dir,
         )
 
+    # Also check glob patterns (Vite outputs hashed filenames like index-AbCd1234.js)
+    glob_outputs: list[Path] = []
+    for pattern in _REQUIRED_DIST_GLOBS:
+        matches = list(dist_dir.glob(pattern))
+        if not matches:
+            return FrontendBundleStatus(
+                needs_build=True,
+                reason="dist_missing",
+                frontend_root=frontend_root,
+                dist_dir=dist_dir,
+            )
+        glob_outputs.extend(matches)
+
+    all_outputs = required_outputs + glob_outputs
+
     input_paths = _input_paths(frontend_root)
     if not input_paths:
         return FrontendBundleStatus(
@@ -95,7 +122,7 @@ def frontend_bundle_status(base_dir: Path | None = None) -> FrontendBundleStatus
         )
 
     latest_input_mtime = max(path.stat().st_mtime_ns for path in input_paths)
-    newest_output_mtime = max(path.stat().st_mtime_ns for path in required_outputs)
+    newest_output_mtime = max(path.stat().st_mtime_ns for path in all_outputs)
     if latest_input_mtime > newest_output_mtime:
         return FrontendBundleStatus(
             needs_build=True,
@@ -109,6 +136,65 @@ def frontend_bundle_status(base_dir: Path | None = None) -> FrontendBundleStatus
         reason="fresh",
         frontend_root=frontend_root,
         dist_dir=dist_dir,
+    )
+
+
+def inspect_frontend_build_readiness(
+    base_dir: Path | None = None,
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+) -> FrontendBuildReadiness:
+    bundle_status = frontend_bundle_status(base_dir)
+    node_available = which("node") is not None
+    npm_available = which("npm") is not None
+    detail = (
+        f"bundle={bundle_status.reason} :: "
+        f"node={'ok' if node_available else 'missing'} :: "
+        f"npm={'ok' if npm_available else 'missing'} :: "
+        f"dist={bundle_status.dist_dir}"
+    )
+
+    if bundle_status.reason == "source_unavailable":
+        return FrontendBuildReadiness(
+            status="ok",
+            summary="Frontend source tree is unavailable; using bundled frontend assets.",
+            detail=detail,
+            hint=None,
+            bundle_status=bundle_status,
+            node_available=node_available,
+            npm_available=npm_available,
+        )
+
+    if not bundle_status.needs_build:
+        return FrontendBuildReadiness(
+            status="ok",
+            summary="Frontend bundle is ready for launch.",
+            detail=detail,
+            hint=None,
+            bundle_status=bundle_status,
+            node_available=node_available,
+            npm_available=npm_available,
+        )
+
+    if node_available and npm_available:
+        return FrontendBuildReadiness(
+            status="warning",
+            summary="Frontend bundle is stale or missing, but the local toolchain can rebuild it.",
+            detail=detail,
+            hint="Run `fmj build` to refresh the local web frontend before launch.",
+            bundle_status=bundle_status,
+            node_available=node_available,
+            npm_available=npm_available,
+        )
+
+    return FrontendBuildReadiness(
+        status="blocked",
+        summary="Frontend bundle is stale or missing, and Node.js/npm are unavailable.",
+        detail=detail,
+        hint="Install Node.js, then run `fmj build` or `npm --prefix frontend run build` before launching the web console.",
+        bundle_status=bundle_status,
+        node_available=node_available,
+        npm_available=npm_available,
     )
 
 
@@ -174,8 +260,10 @@ def sync_frontend_bundle(
 
 
 __all__ = [
+    "FrontendBuildReadiness",
     "FrontendBundleStatus",
     "FrontendSyncResult",
     "frontend_bundle_status",
+    "inspect_frontend_build_readiness",
     "sync_frontend_bundle",
 ]

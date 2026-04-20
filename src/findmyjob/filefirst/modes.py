@@ -16,7 +16,7 @@ _MODE_ROLE_MAP: dict[str, ModelRole] = {
 }
 
 _MODE_ROLE_FALLBACKS: dict[str, tuple[ModelRole, ...]] = {
-    "eval": (ModelRole.WRITER, ModelRole.CLASSIFIER),
+    "eval": (ModelRole.CLASSIFIER, ModelRole.WRITER),
 }
 
 _JSON_RETRYABLE_MARKERS = (

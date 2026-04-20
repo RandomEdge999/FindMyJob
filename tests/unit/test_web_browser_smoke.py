@@ -174,27 +174,30 @@ def test_served_spa_routes_render_in_a_real_browser(tmp_path: Path) -> None:
                 browser = playwright.chromium.launch(headless=True)
                 page = browser.new_page()
 
-                def _goto_and_assert(route: str, text: str) -> None:
+                def _goto_and_assert_heading(route: str, text: str) -> None:
                     page.goto(f'{base_url}{route}', wait_until='domcontentloaded')
+                    page.get_by_role('heading', name=text).first.wait_for(timeout=15000)
+                    assert page.get_by_role('heading', name=text).first.is_visible()
+
+                _goto_and_assert_heading('/', 'Dashboard')
+                page.get_by_text('FindMyJob').first.wait_for(timeout=15000)
+                assert page.get_by_text('Run Status').first.is_visible()
+
+                for route, heading, text in (
+                    ('/setup', 'Setup', 'Readiness'),
+                    ('/settings', 'Settings', 'Readiness & Workspace Health'),
+                    ('/autopilot', 'Autopilot', 'Job queue'),
+                    ('/runs', 'Run History', 'No runs yet'),
+                ):
+                    _goto_and_assert_heading(route, heading)
                     page.get_by_text(text).first.wait_for(timeout=15000)
                     assert page.get_by_text(text).first.is_visible()
 
-                _goto_and_assert('/', 'Find My Job')
-                assert page.get_by_text('Discovery Scoreboard').first.is_visible()
-
-                for route, text in (
-                    ('/setup', 'Workspace And Launch Checks'),
-                    ('/settings', 'Control Center'),
-                    ('/autopilot', 'Queue And Live Activity'),
-                    ('/runs', 'Operational History'),
-                ):
-                    _goto_and_assert(route, text)
-
-                _goto_and_assert(f'/review?application_id={review_application_id}', 'Selected Application')
-                page.get_by_text('Acme / Backend Platform Engineer').first.wait_for(timeout=15000)
+                _goto_and_assert_heading(f'/review?id={review_application_id}', 'Review')
+                page.get_by_text('Backend Platform Engineer').first.wait_for(timeout=15000)
                 assert page.get_by_text('Acme').first.is_visible()
                 page.reload(wait_until='domcontentloaded')
-                page.get_by_text('Acme / Backend Platform Engineer').first.wait_for(timeout=15000)
+                page.get_by_text('Backend Platform Engineer').first.wait_for(timeout=15000)
                 page.get_by_text('Acme').first.wait_for(timeout=15000)
                 assert page.get_by_text('Acme').first.is_visible()
 

@@ -506,6 +506,10 @@ def test_db_reset_operational_clears_runtime_state_and_preserves_memory(tmp_path
     assert payload['preserved']['facts'] == 'profile/facts.yml'
     assert payload['preserved']['answer_memory'] == 'profile/answer-memory.yml'
     assert payload['preserved']['cv'] == 'cv.md'
+    assert payload['preserved']['basic_profile_local_override'] == '.fmj/local-overrides/filefirst/user-profile.yml'
+    assert payload['ledger_exports']['configured_output_base'] == '.fmj/exports/ledger'
+    assert payload['history_after_reset']['run_history'] is False
+    assert payload['history_after_reset']['existing_ledger_exports'] is True
 
     assert ws.load_inbox() == []
     assert ws.load_applications() == []

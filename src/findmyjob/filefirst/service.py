@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 from contextlib import contextmanager
 import json
+import os
 import re
 import shutil
 import threading
@@ -10,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -20,7 +21,7 @@ from findmyjob.core.async_compat import run_async
 from tomlkit import dumps, item, parse, table
 
 from findmyjob.core.config import AppConfig, write_default_workspace_config
-from findmyjob.core.email_otp import fetch_greenhouse_application_receipt
+from findmyjob.core.email_otp import fetch_greenhouse_application_receipt, inspect_email_otp_configuration
 from findmyjob.core.filtering import CANADA_PROVINCE_CODES, US_STATE_CODES, normalize_country_code, normalize_region_code
 from findmyjob.core.lmstudio import (
     LMSTUDIO_AUTO_MODEL,
@@ -31,12 +32,12 @@ from findmyjob.core.lmstudio import (
 from findmyjob.core.runtime import _inspect_playwright
 from findmyjob.core.enums import FactKind, JobLifecycleStatus, ModelRole, Sensitivity, VerificationStatus
 from findmyjob.core.types import ApplicationQuestion, FormFieldBinding, GroundedAnswer, ModelProfile, ProfileFact, SubmissionEvidence, SubmissionPlan
-from findmyjob.filefirst.advanced_models import advanced_models_payload, delete_workspace_model_profile, install_recommended_split_profiles, load_model_router, save_workspace_model_profile
+from findmyjob.filefirst.advanced_models import advanced_models_payload, delete_workspace_model_profile, install_recommended_split_profiles, load_model_router, save_workspace_model_family, save_workspace_model_profile
 from findmyjob.filefirst.dossier import candidate_dossier_metadata, regenerate_candidate_dossier
 from findmyjob.filefirst.evaluate import evaluate_target
 from findmyjob.filefirst.chatgpt_drafting import ChatGPTDraftingService
 from findmyjob.filefirst.live_market import discover_live_market
-from findmyjob.filefirst.models import ApplicationEntry, BoardDiscoveryState, LiveRunState, LocalModelSettings, RunRecord, SourceBoardConfig, SubmissionQuestion, SubmissionRecord, TrackedCompany, utcnow_iso
+from findmyjob.filefirst.models import ApplicationEntry, BoardDiscoveryState, LiveRunState, LocalModelSettings, RunRecord, SourceBoardConfig, SubmissionQuestion, SubmissionRecord, TrackedCompany, WorkspaceProfile, utcnow_iso
 from findmyjob.filefirst.operator_support import _workspace_stats, begin_live_run, emit_live_event as operator_emit_live_event, finish_live_run, jobs_table_payload as operator_jobs_table_payload, live_status_payload as operator_live_status_payload
 from findmyjob.filefirst.readiness import collect_filefirst_release_snapshot
 from findmyjob.filefirst.screening import override_screening, screen_job, screening_payload
@@ -44,6 +45,7 @@ from findmyjob.filefirst.render import build_pdf_for_target
 from findmyjob.filefirst.tracker import tracker_snapshot
 from findmyjob.filefirst.workspace import FileWorkspace, SCAN_HISTORY_COLUMNS
 from findmyjob.grounding.service import GroundingService
+from findmyjob.ledger.export import export_ledger
 from findmyjob.sources.normalizer import build_normalized_job, parse_structured_location, slugify
 from findmyjob.sources.adapters.ashby import AshbyAdapter
 from findmyjob.sources.adapters.greenhouse import GreenhouseAdapter
@@ -60,6 +62,13 @@ _MODEL_CHECK_CACHE: dict[str, dict[str, Any]] = {}
 _GREENHOUSE_LAUNCH_DEFAULT_SOURCES = ["greenhouse"]
 _REGION_CODE_TO_NAME = {code: name.title() for name, code in {**US_STATE_CODES, **CANADA_PROVINCE_CODES}.items()}
 _HANDLED_INBOX_STATES = {"screened_out", "dismissed", "archived", "rejected"}
+_WRITER_LOCAL_ONLY_ROLES = {
+    ModelRole.WRITER.value,
+    ModelRole.RESUME_WRITER.value,
+    ModelRole.COVER_LETTER_WRITER.value,
+}
+_SETTINGS_EXPORT_SCHEMA_VERSION = 1
+_OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
 class FileFirstOperatorService:
     _WORKER_LOCK = threading.RLock()
@@ -301,7 +310,40 @@ class FileFirstOperatorService:
         return self.dashboard_state()
 
     def jobs_table_payload(self, *, limit: int | None = None, include_rejected: bool = False) -> dict[str, Any]:
-        return operator_jobs_table_payload(self.workspace, limit=limit, include_rejected=include_rejected)
+        payload = operator_jobs_table_payload(self.workspace, limit=limit, include_rejected=include_rejected)
+        items = list(payload.get("items") or [])
+        if not items:
+            return payload
+
+        applications = {item.id: item for item in self.workspace.load_applications()}
+        jobs = {item.job_id: item for item in self.workspace.load_inbox()}
+        submissions = {item.application_id: item for item in self.workspace.load_submissions()}
+
+        for item in items:
+            application_id = str(item.get("application_id") or "").strip()
+            item["review_status"] = None
+            item["review_summary"] = None
+            item["manual_handoff"] = None
+            if not application_id:
+                continue
+
+            application = applications.get(application_id)
+            if application is None:
+                continue
+
+            submission = submissions.get(application_id)
+            job_id = str(item.get("job_id") or application.job_id or "").strip()
+            job = jobs.get(job_id)
+            item["review_status"] = submission.status if submission is not None else "not_prepared"
+            item["review_summary"] = self._review_summary(
+                application=application,
+                job=job,
+                submission=submission,
+            )
+            item["manual_handoff"] = self._manual_handoff_summary(submission)
+
+        payload["items"] = items
+        return payload
 
     def live_status_payload(self, *, limit: int = 100) -> dict[str, Any]:
         payload = operator_live_status_payload(self.workspace, limit=limit)
@@ -562,6 +604,148 @@ class FileFirstOperatorService:
             normalized_api_key_env = None
             return normalized_provider, normalized_transport, normalized_base_url, normalized_api_key_env, True
         return normalized_provider, normalized_transport, normalized_base_url, normalized_api_key_env, normalized_transport == "process"
+
+    @staticmethod
+    def _role_requires_local_binding(role: str | None) -> bool:
+        return str(role or "").strip().lower() in _WRITER_LOCAL_ONLY_ROLES
+
+    def _reject_unsupported_role_binding_request(
+        self,
+        *,
+        role: str | None,
+        provider: str | None,
+        transport: str | None,
+    ) -> None:
+        if not self._role_requires_local_binding(role):
+            return
+        requested_provider = str(provider or "").strip().lower()
+        requested_transport = str(transport or "").strip().lower()
+        if requested_provider not in {"", LMSTUDIO_PROVIDER} or requested_transport not in {"", "local_http"}:
+            raise ValueError(
+                "Writer roles must use LM Studio local_http bindings. Remote providers are supported only for screening and question-answering roles."
+            )
+
+    def _normalize_model_profile_settings(
+        self,
+        *,
+        role: str | None,
+        provider: str | None,
+        transport: str | None,
+        base_url: str | None,
+        api_key_env: str | None,
+    ) -> tuple[str, str, str | None, str | None, bool]:
+        requested_provider = provider
+        requested_transport = transport
+        requested_base_url = base_url
+        requested_api_key_env = api_key_env
+        if self._role_requires_local_binding(role):
+            requested_provider = LMSTUDIO_PROVIDER
+            requested_transport = "local_http"
+            requested_api_key_env = None
+        normalized_provider, normalized_transport = self._normalize_provider_transport(requested_provider, requested_transport)
+        if normalized_transport == "local_http":
+            return self._normalize_local_http_settings(
+                provider=normalized_provider,
+                transport=normalized_transport,
+                base_url=requested_base_url,
+                api_key_env=None,
+            )
+        normalized_base_url = str(requested_base_url or "").strip() or None
+        if normalized_provider == "openrouter" and not normalized_base_url:
+            normalized_base_url = _OPENROUTER_DEFAULT_BASE_URL
+        normalized_api_key_env = str(requested_api_key_env or "").strip() or None
+        return normalized_provider, normalized_transport, normalized_base_url, normalized_api_key_env, normalized_transport == "process"
+
+    @staticmethod
+    def _filter_settings_payload(payload: Any, allowed_keys: set[str]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        return {key: payload[key] for key in allowed_keys if key in payload}
+
+    @staticmethod
+    def _portable_runtime_model_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        allowed_keys = {
+            "provider",
+            "transport",
+            "model",
+            "base_url",
+            "temperature",
+            "max_tokens",
+            "preferred_context_window",
+            "local",
+            "command",
+            "working_dir",
+        }
+        portable = FileFirstOperatorService._filter_settings_payload(dict(payload or {}), allowed_keys)
+        return {key: value for key, value in portable.items() if value not in (None, "", []) or isinstance(value, bool)}
+
+    @staticmethod
+    def _portable_autonomous_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        allowed_keys = {
+            "enabled",
+            "submit_enabled",
+            "default_submit_mode",
+            "ready_to_apply_threshold",
+            "browser_mode",
+            "max_open_tabs",
+            "daily_submit_cap",
+            "per_company_daily_cap",
+            "production_sources",
+            "browser_attach_enabled",
+            "browser_cdp_url",
+            "captcha_strategy",
+            "captcha_provider",
+            "captcha_api_key_env",
+            "captcha_solve_timeout_seconds",
+        }
+        portable = FileFirstOperatorService._filter_settings_payload(dict(payload or {}), allowed_keys)
+        return {key: value for key, value in portable.items() if value not in (None, "", []) or isinstance(value, bool)}
+
+    @staticmethod
+    def _portable_chatgpt_drafting_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        raw = dict(payload or {})
+        browser = dict(raw.get("browser") or {})
+        portable = {
+            "enabled": bool(raw.get("enabled", False)),
+            "gpt_url": str(raw.get("gpt_url") or "").strip(),
+            "completion_start_marker": str(raw.get("completion_start_marker") or "").strip(),
+            "completion_end_marker": str(raw.get("completion_end_marker") or "").strip(),
+            "timeout_seconds": raw.get("timeout_seconds"),
+            "prompt_submit_delay_ms": raw.get("prompt_submit_delay_ms"),
+            "download_timeout_seconds": raw.get("download_timeout_seconds"),
+            "max_parallel_jobs": raw.get("max_parallel_jobs"),
+            "use_temporary_chat": bool(raw.get("use_temporary_chat", False)),
+            "browser_mode": str(browser.get("browser_mode") or "").strip(),
+            "browser_cdp_url": str(browser.get("browser_cdp_url") or "").strip(),
+            "launch_if_missing": bool(browser.get("launch_if_missing", False)),
+            "make_default": str(raw.get("renderer") or "").strip() == "chatgpt_download",
+        }
+        return {key: value for key, value in portable.items() if value not in (None, "") or isinstance(value, bool)}
+
+    @staticmethod
+    def _portable_model_profile_payload(profile: ModelProfile) -> dict[str, Any]:
+        payload = profile.model_dump(mode="json")
+        portable = {
+            key: payload.get(key)
+            for key in (
+                "name",
+                "role",
+                "provider",
+                "transport",
+                "model",
+                "base_url",
+                "api_key_env",
+                "temperature",
+                "max_tokens",
+                "supports_structured_output",
+                "fallback_chain",
+                "policy_tags",
+                "local",
+                "command",
+                "working_dir",
+            )
+        }
+        return {key: value for key, value in portable.items() if value not in (None, "", []) or isinstance(value, bool)}
 
     def _workspace_key(self) -> str:
         return str(self.workspace.root.resolve())
@@ -2300,6 +2484,152 @@ class FileFirstOperatorService:
             "live": self.live_status_payload(limit=8),
         }
 
+    def release_posture_payload(self) -> dict[str, Any]:
+        profile = self.workspace.load_profile()
+        production_sources = self._effective_production_sources(profile.runtime.automation.production_sources)
+        experimental_enabled = [source for source in production_sources if source != "greenhouse"]
+        submit_enabled = bool(profile.runtime.automation.submit_enabled)
+        otp = inspect_email_otp_configuration()
+        bind_host = str(os.environ.get("FMJ_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        local_host_values = {"127.0.0.1", "localhost", "::1"}
+        api_surface_status = "guarded" if bind_host.casefold() in local_host_values else "blocked"
+        api_surface_detail = (
+            f"The supported launch scripts bind the operator API to `{bind_host}`. This console does not implement a separate multi-user auth boundary; keep it on loopback for pre-launch use."
+            if api_surface_status == "guarded"
+            else f"`FMJ_HOST` resolves to `{bind_host}`, which exposes the operator API beyond loopback. The product does not provide a hardened multi-user or internet-facing control plane."
+        )
+
+        return {
+            "phase": "pre_launch",
+            "summary": "FindMyJob is pre-launch, local operator software. It does not claim hardened credential storage, universal ATS coverage, or a multi-user authenticated control plane.",
+            "disclaimer": "Enabling live submit, ChatGPT browser automation, or Greenhouse IMAP OTP means you are using your own local browser or mailbox credentials and accepting operator responsibility for external side effects.",
+            "operator_responsibilities": [
+                "Keep secrets and mailbox credentials in local environment variables, not tracked repo files.",
+                "Review every live submit path before treating it as a reliable production workflow.",
+                "Treat non-Greenhouse sources, non-Windows launch paths, and custom mailbox filters as operator-owned risk unless the repo explicitly proves otherwise.",
+            ],
+            "platform_matrix": [
+                {
+                    "id": "windows_powershell",
+                    "label": "Windows PowerShell via start.ps1",
+                    "status": "supported",
+                    "detail": "Primary public launcher with repo-local Python 3.12 checks, LM Studio preflight, and shared build/start flow.",
+                },
+                {
+                    "id": "windows_cmd",
+                    "label": "Windows CMD via start.bat",
+                    "status": "supported",
+                    "detail": "Thin wrapper around start.ps1, so it inherits the same Windows launch contract.",
+                },
+                {
+                    "id": "git_bash_windows",
+                    "label": "Git Bash on Windows via start.sh",
+                    "status": "supported",
+                    "detail": "Explicitly supported as the Windows bash launcher and wired to the shared build/start path.",
+                },
+                {
+                    "id": "linux_wsl_bash",
+                    "label": "Linux or WSL bash via start.sh",
+                    "status": "unsupported",
+                    "detail": "start.sh exits early with an unsupported-runtime message for Linux and WSL bash.",
+                },
+                {
+                    "id": "macos_launch",
+                    "label": "macOS launch path",
+                    "status": "not_yet_evidenced",
+                    "detail": "The repo contains some browser-path hints for Darwin, but it does not ship or validate a public macOS launcher in this release slice.",
+                },
+            ],
+            "feature_matrix": [
+                {
+                    "id": "greenhouse_preview_first",
+                    "label": "Greenhouse preview-first workflow",
+                    "status": "supported",
+                    "detail": "This is the default launch posture: Greenhouse-first, preview-first, and submit-disabled by default.",
+                },
+                {
+                    "id": "live_submit",
+                    "label": "Live submit mode",
+                    "status": "partially_supported",
+                    "detail": "Real submit code paths exist, but they remain pre-launch and operator-responsible. The repo does not claim a fully hardened production-safe submission surface.",
+                },
+                {
+                    "id": "greenhouse_email_otp",
+                    "label": "Greenhouse IMAP OTP helper",
+                    "status": "partially_supported",
+                    "detail": "Optional Greenhouse-only mailbox polling exists for verification and receipt checks. It reads live IMAP credentials from the local environment.",
+                },
+                {
+                    "id": "lever_ashby",
+                    "label": "Lever and Ashby launch paths",
+                    "status": "partially_supported",
+                    "detail": "These sources remain present in code and settings, but the public beta release is still Greenhouse-first rather than claiming broad parity.",
+                },
+                {
+                    "id": "remote_provider_ui",
+                    "label": "Remote model-provider launch UI",
+                    "status": "partially_supported",
+                    "detail": "Settings now expose OpenRouter-style remote_http bindings for screening and question-answering roles. Writer roles remain pinned to LM Studio local_http.",
+                },
+            ],
+            "sensitive_paths": [
+                {
+                    "id": "workspace_config",
+                    "label": "Workspace config and local environment",
+                    "status": "guarded",
+                    "detail": "Sensitive settings are loaded from local config overlays and environment variables. The public repo is expected to remain sample-only while real data stays local.",
+                },
+                {
+                    "id": "email_otp",
+                    "label": "Greenhouse IMAP OTP helper",
+                    "status": str(otp.get("status") or "disabled"),
+                    "detail": str(otp.get("summary") or "Greenhouse email OTP is disabled."),
+                    "warnings": list(otp.get("warnings") or []),
+                    "credential_source": otp.get("credential_source"),
+                },
+                {
+                    "id": "chatgpt_browser_profile",
+                    "label": "ChatGPT drafting browser profile",
+                    "status": "guarded",
+                    "detail": "The drafting browser uses local profile and download directories under the workspace. They are runtime data, not a hardened secret store or tracked artifact surface.",
+                },
+                {
+                    "id": "operator_api",
+                    "label": "Operator API and console",
+                    "status": api_surface_status,
+                    "detail": api_surface_detail,
+                },
+            ],
+            "gates": [
+                {
+                    "id": "submit_enabled",
+                    "label": "Live submit gate",
+                    "status": "enabled" if submit_enabled else "disabled",
+                    "detail": (
+                        "Live submit is currently enabled for the active operator profile."
+                        if submit_enabled
+                        else "Live submit is currently disabled; the default release posture stays preview-first."
+                    ),
+                },
+                {
+                    "id": "experimental_sources",
+                    "label": "Experimental source gate",
+                    "status": "enabled" if experimental_enabled else "disabled",
+                    "detail": (
+                        f"Non-Greenhouse sources are currently enabled: {', '.join(experimental_enabled)}."
+                        if experimental_enabled
+                        else "Only the Greenhouse-first release path is enabled right now."
+                    ),
+                },
+                {
+                    "id": "email_otp",
+                    "label": "Greenhouse OTP gate",
+                    "status": str(otp.get("status") or "disabled"),
+                    "detail": str(otp.get("summary") or "Greenhouse email OTP is disabled."),
+                },
+            ],
+        }
+
     def _configured_ready_to_apply_threshold(self) -> int:
         automation = self.workspace.load_profile().runtime.automation
         try:
@@ -3490,11 +3820,17 @@ class FileFirstOperatorService:
         record: SubmissionRecord,
         question: SubmissionQuestion,
         answer_text: str,
+        provenance: str = "operator",
     ) -> None:
         cleaned_answer = str(answer_text or "").strip()
         if not cleaned_answer:
             return
         if self._is_transient_submission_question(question):
+            return
+        scope = self._classify_capture_reuse_scope(question=question, answer_text=cleaned_answer)
+        if scope != "global":
+            # Job-scoped answers stay in the submission record's manual_answers only;
+            # they are never promoted into shared answer memory.
             return
         from findmyjob.filefirst.models import AnswerMemoryEntry
 
@@ -3523,9 +3859,71 @@ class FileFirstOperatorService:
                 answer_text=cleaned_answer,
                 grounded_fact_ids=[],
                 approved=True,
+                reuse_scope="global",
+                provenance=str(provenance or "operator").strip() or "operator",
+                source_application_id=str(record.application_id or "").strip() or None,
+                updated_at=utcnow_iso(),
             )
         )
         self.workspace.save_answer_memory(answers)
+
+    # --- Phase 2: learning-policy classifier --------------------------------
+    # Company/role-specific free-text prompts that should stay submission-scoped.
+    _JOB_SCOPED_PROMPT_TOKENS = (
+        "why this",
+        "why do you want",
+        "why are you interested",
+        "why this role",
+        "why us",
+        "why this company",
+        "tell us about",
+        "cover letter",
+        "what excites you",
+        "what interests you",
+        "why our",
+        "why you are a good fit",
+        "what makes you",
+    )
+    # Widget types that produce discrete, reusable values.
+    _DISCRETE_REUSABLE_WIDGETS = frozenset(
+        {"select", "radio", "checkbox", "multiselect", "boolean", "dropdown"}
+    )
+    # Long free-form answers are treated as job-scoped regardless of prompt wording.
+    _JOB_SCOPED_ANSWER_LENGTH = 240
+
+    @classmethod
+    def _classify_capture_reuse_scope(
+        cls,
+        *,
+        question: SubmissionQuestion,
+        answer_text: str,
+    ) -> Literal["global", "job_scoped", "transient"]:
+        """Classify how a captured answer may be reused.
+
+        - ``transient``: never stored (verification codes, OTPs). These are already
+          filtered by ``_is_transient_submission_question`` but the classifier is
+          conservative and reports them too.
+        - ``job_scoped``: stays in the submission record only (long free-form text,
+          or prompts that are clearly tied to this company/role).
+        - ``global``: safe to promote into shared answer memory (short stable values,
+          discrete widget selections, standard identity/demographic answers).
+        """
+        if cls._is_transient_submission_question(question):
+            return "transient"
+        cleaned = str(answer_text or "").strip()
+        if not cleaned:
+            return "transient"
+        widget = str(question.widget_type or "").strip().lower()
+        if widget in cls._DISCRETE_REUSABLE_WIDGETS:
+            return "global"
+        prompt = str(question.prompt_text or "").strip().lower()
+        if any(token in prompt for token in cls._JOB_SCOPED_PROMPT_TOKENS):
+            return "job_scoped"
+        if widget in {"textarea", "long_text", "multiline"}:
+            return "job_scoped"
+        if len(cleaned) >= cls._JOB_SCOPED_ANSWER_LENGTH:
+            return "job_scoped"
+        return "global"
 
     def _manual_handoff_submitter(self) -> PlaywrightSubmitter:
         automation = self.workspace.load_profile().runtime.automation
@@ -3699,10 +4097,10 @@ class FileFirstOperatorService:
             next_action = "sync_manual_input"
             next_action_reason = "A parked browser page is being watched. Sync any manual edits back into answer memory."
         elif hard_blockers:
-            next_action = "open_manual_input" if review_status in {"needs_user_input", "blocked", "preview_ready"} else "save_answers"
+            next_action = "request_input"
             next_action_reason = "Required questions or low-confidence answers still block submission."
         elif unresolved_question_count:
-            next_action = "save_answers"
+            next_action = "request_input"
             next_action_reason = "Unresolved prompts are still waiting for operator answers."
         elif ready_for_submit:
             next_action = "approve"
@@ -3910,7 +4308,14 @@ class FileFirstOperatorService:
         updated_questions: list[dict[str, Any]] = []
         filled_blank_count = 0
         corrected_answer_count = 0
+        learned_global_count = 0
+        job_scoped_count = 0
         record_dirty = False
+        provenance = (
+            "manual_handoff_watch"
+            if confidence_reason == "manual_handoff_watch"
+            else "manual_handoff_sync"
+        )
 
         for capture in captures:
             question_id = str(capture.get("question_id") or "").strip()
@@ -3935,12 +4340,19 @@ class FileFirstOperatorService:
                 verification_status="verified",
                 event_status="manual_handoff_synced",
             )
-            if approve_memory:
+            scope = self._classify_capture_reuse_scope(
+                question=updated_question, answer_text=answer_text
+            )
+            if approve_memory and scope == "global":
                 self._store_approved_answer_memory_entry(
                     record=record,
                     question=updated_question,
                     answer_text=answer_text,
+                    provenance=provenance,
                 )
+                learned_global_count += 1
+            elif scope == "job_scoped":
+                job_scoped_count += 1
             if previous_answer:
                 corrected_answer_count += 1
             else:
@@ -3956,6 +4368,7 @@ class FileFirstOperatorService:
                     "filled_blank": not previous_answer,
                     "corrected_answer": bool(previous_answer),
                     "change_type": "filled_blank" if not previous_answer else "corrected_answer",
+                    "reuse_scope": scope,
                 }
             )
 
@@ -3971,6 +4384,8 @@ class FileFirstOperatorService:
                         "updated_count": len(updated_questions),
                         "filled_blank_count": filled_blank_count,
                         "corrected_answer_count": corrected_answer_count,
+                        "learned_global_count": learned_global_count,
+                        "job_scoped_count": job_scoped_count,
                         "updated_questions": updated_questions,
                     },
                 )
@@ -3998,14 +4413,28 @@ class FileFirstOperatorService:
                     "updated_questions": updated_questions,
                     "filled_blank_count": filled_blank_count,
                     "corrected_answer_count": corrected_answer_count,
+                    "learned_global_count": learned_global_count,
+                    "job_scoped_count": job_scoped_count,
                 },
             )
 
+        if not updated_questions:
+            outcome = "no_changes"
+        elif filled_blank_count and not corrected_answer_count:
+            outcome = "blank_filled"
+        elif corrected_answer_count and not filled_blank_count:
+            outcome = "corrected"
+        else:
+            outcome = "mixed_updates"
+
         return {
             "application_id": application_id,
+            "outcome": outcome,
             "updated_count": len(updated_questions),
             "filled_blank_count": filled_blank_count,
             "corrected_answer_count": corrected_answer_count,
+            "learned_global_count": learned_global_count,
+            "job_scoped_count": job_scoped_count,
             "updated_questions": updated_questions,
             "remaining_blockers": self._submission_blockers(record),
             "status": record.status,
@@ -4030,13 +4459,18 @@ class FileFirstOperatorService:
             "synced_question_count": int(current_state.get("synced_question_count") or 0),
             "filled_blank_count": int(current_state.get("filled_blank_count") or 0),
             "corrected_answer_count": int(current_state.get("corrected_answer_count") or 0),
+            "learned_global_count": int(current_state.get("learned_global_count") or 0),
+            "job_scoped_count": int(current_state.get("job_scoped_count") or 0),
             "recent_answers": list(current_state.get("recent_answers") or []),
         }
         persisted = {
             "application_id": application_id,
+            "outcome": "page_missing",
             "updated_count": 0,
             "filled_blank_count": 0,
             "corrected_answer_count": 0,
+            "learned_global_count": 0,
+            "job_scoped_count": 0,
             "updated_questions": [],
             "remaining_blockers": self._submission_blockers(self.workspace.load_submission(application_id)),
             "status": None,
@@ -4064,6 +4498,12 @@ class FileFirstOperatorService:
             update_payload["filled_blank_count"] = int(update_payload["filled_blank_count"]) + int(persisted["filled_blank_count"])
             update_payload["corrected_answer_count"] = int(update_payload["corrected_answer_count"]) + int(
                 persisted["corrected_answer_count"]
+            )
+            update_payload["learned_global_count"] = int(update_payload["learned_global_count"]) + int(
+                persisted.get("learned_global_count") or 0
+            )
+            update_payload["job_scoped_count"] = int(update_payload["job_scoped_count"]) + int(
+                persisted.get("job_scoped_count") or 0
             )
             if persisted["updated_questions"]:
                 update_payload["recent_answers"] = list(persisted["updated_questions"][-5:])
@@ -4315,6 +4755,7 @@ class FileFirstOperatorService:
                 record=record,
                 question=updated_question,
                 answer_text=cleaned_answer,
+                provenance="operator_manual_answer",
             )
         retry_payload: dict[str, Any] | None = None
         if auto_retry:
@@ -4569,11 +5010,181 @@ class FileFirstOperatorService:
         runs = [self._run_record_summary(run) for run in self.workspace.load_runs()[:limit]]
         return {"count": len(runs), "items": runs, "activity": runs[:6]}
 
+    def _portable_path(self, path: Path | str) -> str:
+        return self.workspace.relative_path(path).replace("\\", "/")
+
+    def _configured_ledger_output_base(self) -> Path:
+        try:
+            return AppConfig.load(self.workspace.root).autonomous_ledger_output_path(self.workspace.root)
+        except Exception:
+            return self.workspace.fmj_dir / "exports" / "ledger"
+
+    def _configured_ledger_export_files(self) -> tuple[Path, list[Path]]:
+        destination_without_suffix = self._configured_ledger_output_base()
+        candidates = [
+            destination_without_suffix.with_suffix(".csv"),
+            destination_without_suffix.with_suffix(".xlsx"),
+            destination_without_suffix.parent / "applications.csv",
+            destination_without_suffix.parent / "questions.csv",
+            destination_without_suffix.parent / "accounts.csv",
+        ]
+        existing = sorted(
+            [path for path in candidates if path.exists() and path.is_file()],
+            key=lambda item: str(item).casefold(),
+        )
+        return destination_without_suffix, existing
+
+    def _ledger_export_file_payloads(self, files: list[Path]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for path in files:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            payloads.append(
+                {
+                    "path": self._portable_path(path),
+                    "size_bytes": stat.st_size,
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+            )
+        return payloads
+
+    def ledger_export_status_payload(self) -> dict[str, Any]:
+        self.workspace.ensure()
+        output_base, existing_files = self._configured_ledger_export_files()
+        file_payloads = self._ledger_export_file_payloads(existing_files)
+        applications = self.workspace.load_applications()
+        pending_questions = 0
+        indexed_applications = {item.id: item for item in applications}
+        for record in self.workspace.load_submissions():
+            if not self._is_active_submission(record):
+                continue
+            application = indexed_applications.get(record.application_id)
+            if application is not None and application.status in _INACTIVE_APPLICATION_STATUSES:
+                continue
+            for question in record.questions:
+                answer_text = str(question.existing_answer or record.manual_answers.get(question.normalized_key or "", "") or "").strip()
+                if question.needs_user_input or not answer_text:
+                    pending_questions += 1
+        last_generated_at = max((item.get("modified_at") for item in file_payloads if item.get("modified_at")), default=None)
+        return {
+            "configured_output_base": self._portable_path(output_base),
+            "directory": self._portable_path(output_base.parent),
+            "existing_files": [item["path"] for item in file_payloads],
+            "files": file_payloads,
+            "exists": bool(file_payloads),
+            "survives_reset": True,
+            "last_generated_at": last_generated_at,
+            "current_state": {
+                "applications": len(applications),
+                "submissions": len(self.workspace.load_submissions()),
+                "pending_questions": pending_questions,
+            },
+            "generation": {
+                "supported": True,
+                "source": "file_first_workspace",
+                "trigger": "manual_operator_export",
+                "targets": [
+                    self._portable_path(output_base.with_suffix(".csv")),
+                    self._portable_path(output_base.with_suffix(".xlsx")),
+                    self._portable_path(output_base.parent / "applications.csv"),
+                    self._portable_path(output_base.parent / "questions.csv"),
+                    self._portable_path(output_base.parent / "accounts.csv"),
+                ],
+                "summary": "Generates a ledger snapshot from the current file-first workspace state.",
+            },
+        }
+
+    def generate_ledger_export_payload(self) -> dict[str, Any]:
+        self.workspace.ensure()
+        output_base = self._configured_ledger_output_base()
+        csv_path, xlsx_path = export_ledger(self.workspace, output_base)
+        companion_files = [
+            output_base.parent / "applications.csv",
+            output_base.parent / "questions.csv",
+            output_base.parent / "accounts.csv",
+        ]
+        status = self.ledger_export_status_payload()
+        return {
+            "generated": True,
+            "generated_files": [
+                self._portable_path(path)
+                for path in [csv_path, xlsx_path, *companion_files]
+                if path.exists()
+            ],
+            **status,
+        }
+
+    def reset_operational_state_contract_payload(self) -> dict[str, Any]:
+        self.workspace.ensure()
+        ledger_output_base, ledger_export_files = self._configured_ledger_export_files()
+        preserved = {
+            "profile": self._portable_path(self.workspace.profile_path),
+            "basic_profile_local_override": self._portable_path(self.workspace.user_profile_path),
+            "portals": self._portable_path(self.workspace.portals_path),
+            "facts": self._portable_path(self.workspace.facts_path),
+            "answer_memory": self._portable_path(self.workspace.answer_memory_path),
+            "cv": self._portable_path(self.workspace.cv_path),
+            "candidate_dossier": self._portable_path(self.workspace.candidate_dossier_path),
+            "workspace_model_config": self._portable_path(self.workspace.workspace_config_path),
+            "handled_jobs": self._portable_path(self.workspace.handled_jobs_path),
+            "modes_dir": self._portable_path(self.workspace.modes_dir),
+        }
+        return {
+            "action": "reset_operational",
+            "clears": {
+                "inbox": self._portable_path(self.workspace.inbox_path),
+                "applications": self._portable_path(self.workspace.applications_path),
+                "scan_history": self._portable_path(self.workspace.scan_history_path),
+                "jobs": self._portable_path(self.workspace.jobs_dir),
+                "evaluations": self._portable_path(self.workspace.evaluations_dir),
+                "submissions": self._portable_path(self.workspace.submissions_dir),
+                "runs": self._portable_path(self.workspace.runs_dir),
+                "reports": self._portable_path(self.workspace.reports_dir),
+                "output_files": self._portable_path(self.workspace.output_dir),
+                "chatgpt_runtime": self._portable_path(self.workspace.runtime_dir),
+                "live_events": self._portable_path(self.workspace.live_events_path),
+                "live_run_traces": self._portable_path(self.workspace.live_runs_dir),
+                "board_discovery": self._portable_path(self.workspace.board_discovery_path),
+            },
+            "preserved": preserved,
+            "ledger_exports": {
+                "configured_output_base": self._portable_path(ledger_output_base),
+                "directory": self._portable_path(ledger_output_base.parent),
+                "existing_files": [self._portable_path(path) for path in ledger_export_files],
+                "survives_reset": True,
+            },
+            "history_after_reset": {
+                "applications": False,
+                "submissions": False,
+                "review_history": False,
+                "run_history": False,
+                "reports": False,
+                "output_artifacts": False,
+                "live_traces": False,
+                "profile_and_answer_memory": True,
+                "handled_job_memory": True,
+                "existing_ledger_exports": True,
+            },
+            "summary": [
+                "Clears the current job queue, file-first application/submission/run history, reports, output artifacts, runtime scratch files, and live traces.",
+                "Preserves profile basics, portals, facts, answer memory, candidate dossier, workspace config, handled-job memory, modes, and any existing ledger export files.",
+                "Reset does not create a new ledger snapshot; it only preserves export files that already exist.",
+            ],
+        }
+
     def reset_operational_state_payload(self) -> dict[str, Any]:
         self.workspace.ensure()
-        def _clear_tree(directory: Path) -> int:
+        _ledger_output_base, ledger_export_files = self._configured_ledger_export_files()
+
+        def _clear_tree(directory: Path, *, preserve: set[Path] | None = None) -> int:
             removed = 0
+            preserved_paths = {path.resolve() for path in (preserve or set())}
+            preserved_ancestors = {ancestor for path in preserved_paths for ancestor in (path, *path.parents)}
             for path in sorted(directory.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+                if path.resolve() in preserved_ancestors:
+                    continue
                 try:
                     if path.is_file() or path.is_symlink():
                         path.unlink()
@@ -4619,7 +5230,7 @@ class FileFirstOperatorService:
             ("output_files", self.workspace.output_dir),
             ("chatgpt_runtime", self.workspace.runtime_dir),
         ):
-            deleted[key] = _clear_tree(directory)
+            deleted[key] = _clear_tree(directory, preserve=set(ledger_export_files))
 
         # Clear stale board discovery metrics so post-reset UI is truthful.
         self.workspace.save_board_discovery_state(BoardDiscoveryState())
@@ -4630,24 +5241,11 @@ class FileFirstOperatorService:
 
         self._submission_registry.clear()
         self._save_submission_registry()
-        def _portable(path: Path) -> str:
-            return self.workspace.relative_path(path).replace("\\", "/")
-
-        preserved = {
-            "profile": _portable(self.workspace.profile_path),
-            "portals": _portable(self.workspace.portals_path),
-            "facts": _portable(self.workspace.facts_path),
-            "answer_memory": _portable(self.workspace.answer_memory_path),
-            "cv": _portable(self.workspace.cv_path),
-            "candidate_dossier": _portable(self.workspace.candidate_dossier_path),
-            "workspace_model_config": _portable(self.workspace.workspace_config_path),
-            "handled_jobs": _portable(self.workspace.handled_jobs_path),
-            "modes_dir": _portable(self.workspace.modes_dir),
-        }
+        contract = self.reset_operational_state_contract_payload()
         return {
+            **contract,
             "reset": True,
             "deleted": deleted,
-            "preserved": preserved,
             "handled_jobs": {
                 "job_ids": len(handled_before_reset.get("job_ids") or []),
                 "urls": len(handled_before_reset.get("urls") or []),
@@ -4656,6 +5254,179 @@ class FileFirstOperatorService:
             },
             "autonomous": self.autonomous_status_payload(),
             "jobs_table": self.jobs_table_payload(limit=25, include_rejected=False),
+        }
+
+    @staticmethod
+    def _basic_profile_text(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    @staticmethod
+    def _basic_profile_lines(value: Any) -> list[str]:
+        if isinstance(value, str):
+            raw_items = value.replace(",", "\n").splitlines()
+        else:
+            raw_items = list(value or [])
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            cleaned = str(item or "").strip()
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(cleaned)
+        return normalized
+
+    @classmethod
+    def _looks_like_email(cls, value: str | None) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return True
+        return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", text))
+
+    def basic_profile_payload(self) -> dict[str, Any]:
+        surface = self.workspace.user_profile_surface()
+        defaults = WorkspaceProfile()
+        stored = self.workspace.load_user_profile()
+        stored_candidate = stored.get("candidate") if isinstance(stored.get("candidate"), dict) else {}
+        stored_targets = stored.get("targets") if isinstance(stored.get("targets"), dict) else {}
+        stored_authorization = stored.get("authorization") if isinstance(stored.get("authorization"), dict) else {}
+        effective = self.workspace.load_profile()
+
+        candidate_values = defaults.candidate.model_dump(mode="json")
+        candidate_values.update({
+            "name": str(stored_candidate.get("name") or candidate_values.get("name") or "").strip(),
+            "email": self._basic_profile_text(stored_candidate.get("email")),
+            "phone": self._basic_profile_text(stored_candidate.get("phone")),
+            "location": self._basic_profile_text(stored_candidate.get("location")),
+            "linkedin": self._basic_profile_text(stored_candidate.get("linkedin")),
+            "github": self._basic_profile_text(stored_candidate.get("github")),
+            "website": self._basic_profile_text(stored_candidate.get("website")),
+            "summary": self._basic_profile_text(stored_candidate.get("summary")),
+            "target_roles": self._basic_profile_lines(stored_candidate.get("target_roles") or candidate_values.get("target_roles") or []),
+        })
+
+        targets_values = defaults.targets.model_dump(mode="json")
+        targets_values.update({
+            "title_keywords": self._basic_profile_lines(stored_targets.get("title_keywords") or targets_values.get("title_keywords") or []),
+            "locations": self._basic_profile_lines(stored_targets.get("locations") or targets_values.get("locations") or []),
+            "countries": self._basic_profile_lines(stored_targets.get("countries") or targets_values.get("countries") or []),
+            "regions": self._basic_profile_lines(stored_targets.get("regions") or targets_values.get("regions") or []),
+            "cities": self._basic_profile_lines(stored_targets.get("cities") or targets_values.get("cities") or []),
+            "remote_only": bool(stored_targets.get("remote_only", targets_values.get("remote_only", True))),
+        })
+
+        authorization_values = {
+            "is_authorized": stored_authorization.get("is_authorized") if "is_authorized" in stored_authorization else None,
+            "requires_future_sponsorship": (
+                stored_authorization.get("requires_future_sponsorship")
+                if "requires_future_sponsorship" in stored_authorization
+                else None
+            ),
+        }
+
+        guidance = {
+            "writes_to": self.workspace.relative_path(self.workspace.user_profile_path),
+            "template_path": self.workspace.relative_path(self.workspace.public_user_profile_template_path),
+            "mode": surface.get("mode"),
+            "can_save": surface.get("mode") != "advanced_local_overrides",
+            "active_advanced_paths": list(surface.get("active_advanced_paths") or []),
+            "included_fields": [
+                "contact basics",
+                "profile summary",
+                "target roles and discovery filters",
+                "work authorization",
+            ],
+            "excluded_fields": [
+                "education",
+                "languages",
+                "work and project facts",
+                "skills inventory",
+                "job-specific manual answers",
+            ],
+        }
+
+        return {
+            "profile_surface": surface,
+            "values": {
+                "candidate": candidate_values,
+                "targets": targets_values,
+                "authorization": authorization_values,
+            },
+            "effective": {
+                "candidate": effective.candidate.model_dump(mode="json"),
+                "targets": effective.targets.model_dump(mode="json"),
+            },
+            "guidance": guidance,
+        }
+
+    def save_basic_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        surface = self.workspace.user_profile_surface()
+        if surface.get("mode") == "advanced_local_overrides":
+            raise ValueError(
+                "Advanced local override files are already active. Setup will not overwrite them; edit the active local override files instead."
+            )
+
+        candidate_payload = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
+        targets_payload = payload.get("targets") if isinstance(payload.get("targets"), dict) else {}
+        authorization_payload = payload.get("authorization") if isinstance(payload.get("authorization"), dict) else {}
+
+        candidate_email = self._basic_profile_text(candidate_payload.get("email"))
+        if not self._looks_like_email(candidate_email):
+            raise ValueError("Candidate email must look like a valid email address.")
+
+        existing = self.workspace.load_user_profile()
+        existing_candidate = existing.get("candidate") if isinstance(existing.get("candidate"), dict) else {}
+        existing_targets = existing.get("targets") if isinstance(existing.get("targets"), dict) else {}
+
+        merged_payload = dict(existing)
+        merged_payload["candidate"] = {
+            **existing_candidate,
+            "name": str(candidate_payload.get("name") or "").strip(),
+            "email": candidate_email,
+            "phone": self._basic_profile_text(candidate_payload.get("phone")),
+            "location": self._basic_profile_text(candidate_payload.get("location")),
+            "linkedin": self._basic_profile_text(candidate_payload.get("linkedin")),
+            "github": self._basic_profile_text(candidate_payload.get("github")),
+            "website": self._basic_profile_text(candidate_payload.get("website")),
+            "summary": self._basic_profile_text(candidate_payload.get("summary")),
+            "target_roles": self._basic_profile_lines(candidate_payload.get("target_roles") or []),
+        }
+        merged_payload["targets"] = {
+            **existing_targets,
+            "title_keywords": self._basic_profile_lines(targets_payload.get("title_keywords") or []),
+            "locations": self._basic_profile_lines(targets_payload.get("locations") or []),
+            "countries": self._basic_profile_lines(targets_payload.get("countries") or []),
+            "regions": self._basic_profile_lines(targets_payload.get("regions") or []),
+            "cities": self._basic_profile_lines(targets_payload.get("cities") or []),
+            "remote_only": bool(targets_payload.get("remote_only", True)),
+        }
+
+        is_authorized = authorization_payload.get("is_authorized")
+        requires_future_sponsorship = authorization_payload.get("requires_future_sponsorship")
+        normalized_authorization = {
+            key: value
+            for key, value in {
+                "is_authorized": is_authorized if isinstance(is_authorized, bool) else None,
+                "requires_future_sponsorship": (
+                    requires_future_sponsorship if isinstance(requires_future_sponsorship, bool) else None
+                ),
+            }.items()
+            if value is not None
+        }
+        if normalized_authorization:
+            merged_payload["authorization"] = normalized_authorization
+        else:
+            merged_payload.pop("authorization", None)
+
+        self.workspace.save_user_profile(merged_payload)
+        return {
+            "saved": True,
+            "profile": self.basic_profile_payload(),
+            "readiness": self.setup_readiness_payload(),
         }
 
     def settings_payload(self) -> dict[str, Any]:
@@ -4730,6 +5501,166 @@ class FileFirstOperatorService:
             "blocked_count": sum(1 for item in findings if item["status"] == "blocked"),
             "warning_count": sum(1 for item in findings if item["status"] == "warning"),
             "findings": findings,
+        }
+
+    def export_non_personal_settings_payload(self) -> dict[str, Any]:
+        settings = self.settings_payload()
+        try:
+            configured_models = AppConfig.load(self.workspace.root).models
+        except Exception:
+            configured_models = {}
+        bundle = {
+            "schema_version": _SETTINGS_EXPORT_SCHEMA_VERSION,
+            "bundle_type": "findmyjob_non_personal_settings",
+            "exported_at": utcnow_iso(),
+            "notes": [
+                "Excludes candidate profile data, facts, answer memory, dossiers, runtime history, exports, and secrets.",
+                "API key environment-variable names are preserved, but secret values are never exported.",
+                "Import merges supported settings into the current workspace and does not delete unspecified profiles.",
+            ],
+            "portals": {
+                "sources": dict((settings.get("portals") or {}).get("sources") or {}),
+                "tracked_companies": list(settings.get("tracked_companies") or []),
+            },
+            "autonomous": self._portable_autonomous_payload(settings.get("autonomous")),
+            "runtime_model": self._portable_runtime_model_payload(settings.get("runtime_model")),
+            "chatgpt_drafting": self._portable_chatgpt_drafting_payload(settings.get("chatgpt_drafting")),
+            "model_profiles": [
+                self._portable_model_profile_payload(profile)
+                for profile in configured_models.values()
+            ],
+        }
+        return {"exported": True, "bundle": bundle}
+
+    def import_non_personal_settings_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_bundle = dict(payload or {})
+        if isinstance(raw_bundle.get("bundle"), dict):
+            bundle = dict(raw_bundle.get("bundle") or {})
+        else:
+            bundle = raw_bundle
+        if not bundle:
+            raise ValueError("Settings import payload must be a non-empty object.")
+
+        imported_sections: list[str] = []
+
+        portals_payload = bundle.get("portals")
+        if isinstance(portals_payload, dict):
+            self.save_portal_settings(
+                {
+                    "sources": dict(portals_payload.get("sources") or {}),
+                    "tracked_companies": list(portals_payload.get("tracked_companies") or []),
+                }
+            )
+            imported_sections.append("portals")
+
+        autonomous_payload = self._filter_settings_payload(
+            bundle.get("autonomous"),
+            {
+                "enabled",
+                "submit_enabled",
+                "default_submit_mode",
+                "ready_to_apply_threshold",
+                "browser_mode",
+                "max_open_tabs",
+                "daily_submit_cap",
+                "per_company_daily_cap",
+                "production_sources",
+                "browser_attach_enabled",
+                "browser_cdp_url",
+                "captcha_strategy",
+                "captcha_provider",
+                "captcha_api_key_env",
+                "captcha_solve_timeout_seconds",
+            },
+        )
+        if autonomous_payload:
+            self.save_autonomous_settings(autonomous_payload)
+            imported_sections.append("autonomous")
+
+        runtime_model_payload = self._filter_settings_payload(
+            bundle.get("runtime_model"),
+            {
+                "provider",
+                "transport",
+                "model",
+                "base_url",
+                "temperature",
+                "max_tokens",
+                "preferred_context_window",
+                "local",
+                "command",
+                "working_dir",
+            },
+        )
+        if runtime_model_payload:
+            self.save_runtime_model(runtime_model_payload)
+            imported_sections.append("runtime_model")
+
+        chatgpt_payload = self._filter_settings_payload(
+            bundle.get("chatgpt_drafting"),
+            {
+                "enabled",
+                "gpt_url",
+                "completion_start_marker",
+                "completion_end_marker",
+                "browser_mode",
+                "browser_cdp_url",
+                "launch_if_missing",
+                "use_temporary_chat",
+                "timeout_seconds",
+                "prompt_submit_delay_ms",
+                "download_timeout_seconds",
+                "max_parallel_jobs",
+                "make_default",
+            },
+        )
+        if chatgpt_payload:
+            self.save_chatgpt_drafting_settings(chatgpt_payload)
+            imported_sections.append("chatgpt_drafting")
+
+        imported_model_names: list[str] = []
+        for item in list(bundle.get("model_profiles") or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or name == "runtime-model":
+                continue
+            model_payload = self._filter_settings_payload(
+                item,
+                {
+                    "role",
+                    "provider",
+                    "transport",
+                    "model",
+                    "base_url",
+                    "api_key_env",
+                    "temperature",
+                    "max_tokens",
+                    "supports_structured_output",
+                    "fallback_chain",
+                    "policy_tags",
+                    "local",
+                    "command",
+                    "working_dir",
+                },
+            )
+            if not model_payload:
+                continue
+            self.save_model_profile(name, model_payload)
+            imported_model_names.append(name)
+        if imported_model_names:
+            imported_sections.append("model_profiles")
+
+        if not imported_sections:
+            raise ValueError("Settings import bundle did not contain any supported sections.")
+
+        exported = self.export_non_personal_settings_payload()
+        return {
+            "imported": True,
+            "sections": imported_sections,
+            "model_profiles": imported_model_names,
+            "bundle": exported["bundle"],
+            "advanced_models": advanced_models_payload(self.workspace),
         }
 
     def save_greenhouse_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -4925,17 +5856,40 @@ class FileFirstOperatorService:
             result["saved"] = True
             return result
         sanitized_payload = dict(payload)
+        existing_role: str | None = None
+        try:
+            existing_profile = AppConfig.load(self.workspace.root).models.get(name)
+        except Exception:
+            existing_profile = None
+        if existing_profile is not None:
+            existing_role = existing_profile.role.value
+        role = str(sanitized_payload.get("role") or existing_role or "").strip() or None
+        self._reject_unsupported_role_binding_request(
+            role=role,
+            provider=sanitized_payload.get("provider"),
+            transport=sanitized_payload.get("transport"),
+        )
+        provider, transport, base_url, api_key_env, local = self._normalize_model_profile_settings(
+            role=role,
+            provider=sanitized_payload.get("provider"),
+            transport=sanitized_payload.get("transport"),
+            base_url=sanitized_payload.get("base_url"),
+            api_key_env=sanitized_payload.get("api_key_env"),
+        )
         sanitized_payload["model"] = str(sanitized_payload.get("model") or "").strip() or LMSTUDIO_AUTO_MODEL
         sanitized_payload.update(
             {
-                "provider": LMSTUDIO_PROVIDER,
-                "transport": "local_http",
-                "api_key_env": None,
-                "command": [],
-                "working_dir": None,
-                "local": True,
+                "role": role,
+                "provider": provider,
+                "transport": transport,
+                "base_url": base_url,
+                "api_key_env": api_key_env,
+                "local": local,
             }
         )
+        if self._role_requires_local_binding(role):
+            sanitized_payload["command"] = []
+            sanitized_payload["working_dir"] = None
         saved_profile = save_workspace_model_profile(self.workspace, name, sanitized_payload)
         return {"saved": True, "model_profile": saved_profile.model_dump(mode="json"), "advanced_models": advanced_models_payload(self.workspace)}
 
@@ -4946,11 +5900,12 @@ class FileFirstOperatorService:
             if router is None:
                 raise ValueError("Model router is not configured for saved profile pings.")
             profile = router.get_profile(name=profile_name)
-            provider, transport, base_url, api_key_env, local = self._normalize_local_http_settings(
-                provider=LMSTUDIO_PROVIDER,
-                transport="local_http",
+            provider, transport, base_url, api_key_env, local = self._normalize_model_profile_settings(
+                role=profile.role.value,
+                provider=profile.provider,
+                transport=profile.transport,
                 base_url=profile.base_url,
-                api_key_env=None,
+                api_key_env=profile.api_key_env,
             )
             profile = profile.model_copy(
                 update={
@@ -4970,11 +5925,12 @@ class FileFirstOperatorService:
                 name=str(payload.get("name") or "runtime-model").strip() or "runtime-model",
                 role=payload.get("role"),
             )
-            provider, transport, base_url, api_key_env, local = self._normalize_local_http_settings(
-                provider=LMSTUDIO_PROVIDER,
-                transport="local_http",
+            provider, transport, base_url, api_key_env, local = self._normalize_model_profile_settings(
+                role=profile.role.value,
+                provider=profile.provider,
+                transport=profile.transport,
                 base_url=profile.base_url,
-                api_key_env=None,
+                api_key_env=profile.api_key_env,
             )
             profile = profile.model_copy(
                 update={
@@ -4995,6 +5951,45 @@ class FileFirstOperatorService:
 
     def install_recommended_models(self) -> dict[str, Any]:
         result = install_recommended_split_profiles(self.workspace)
+        result["advanced_models"] = advanced_models_payload(self.workspace)
+        return result
+
+    def save_model_family(self, family_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized_family = str(family_id or "").strip().lower()
+        if normalized_family not in {"screening", "drafting", "qa"}:
+            raise ValueError(f"Unknown model family: {family_id}")
+        if normalized_family == "drafting":
+            self._reject_unsupported_role_binding_request(
+                role=ModelRole.WRITER.value,
+                provider=payload.get("provider"),
+                transport=payload.get("transport"),
+            )
+        requested_provider = str(payload.get("provider") or "").strip() or LMSTUDIO_PROVIDER
+        requested_transport = "local_http" if requested_provider == LMSTUDIO_PROVIDER else "remote_http"
+        provider, transport, base_url, api_key_env, _local = self._normalize_model_profile_settings(
+            role=ModelRole.CLASSIFIER.value if normalized_family == "screening" else ModelRole.QUESTION_ANSWERER.value,
+            provider=requested_provider,
+            transport=payload.get("transport") or requested_transport,
+            base_url=payload.get("base_url"),
+            api_key_env=payload.get("api_key_env"),
+        )
+        if normalized_family == "drafting":
+            provider, transport, base_url, api_key_env, _local = self._normalize_model_profile_settings(
+                role=ModelRole.WRITER.value,
+                provider=LMSTUDIO_PROVIDER,
+                transport="local_http",
+                base_url=payload.get("base_url"),
+                api_key_env=None,
+            )
+        result = save_workspace_model_family(
+            self.workspace,
+            family_id,
+            model=payload.get("model"),
+            base_url=base_url,
+            provider=provider,
+            transport=transport,
+            api_key_env=api_key_env,
+        )
         result["advanced_models"] = advanced_models_payload(self.workspace)
         return result
 

@@ -283,7 +283,7 @@ def test_ashby_adapter_preview_submission_uses_canonical_application_url(monkeyp
         def __init__(self, **kwargs):
             _ = kwargs
 
-        async def preview_generic_form(self, url: str, plan: SubmissionPlan, output_dir: Path) -> SubmissionResult:
+        async def preview_generic_form(self, url: str, plan: SubmissionPlan, output_dir: Path, *, keep_browser_open: bool = False) -> SubmissionResult:
             _ = plan
             _ = output_dir
             called.append(url)

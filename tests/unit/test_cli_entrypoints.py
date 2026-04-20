@@ -8,8 +8,26 @@ from findmyjob.core.assets import ensure_default_workspace_templates
 from findmyjob.core.config import write_default_workspace_config
 from findmyjob.core.paths import workspace_config_file
 from findmyjob.core.runtime import AppRuntime
+from findmyjob.web.frontend_sync import FrontendBuildReadiness, FrontendBundleStatus
 
 runner = CliRunner()
+
+
+def _blocked_frontend_readiness(tmp_path: Path) -> FrontendBuildReadiness:
+    return FrontendBuildReadiness(
+        status="blocked",
+        summary="Frontend bundle is stale or missing, and Node.js/npm are unavailable.",
+        detail="bundle=stale_dist :: node=missing :: npm=missing",
+        hint="Install Node.js, then run `fmj build` or `npm --prefix frontend run build` before launching the web console.",
+        bundle_status=FrontendBundleStatus(
+            needs_build=True,
+            reason="stale_dist",
+            frontend_root=tmp_path / "frontend",
+            dist_dir=tmp_path / "src" / "findmyjob" / "web" / "frontend_dist",
+        ),
+        node_available=False,
+        npm_available=False,
+    )
 
 
 def test_start_cli_json_initializes_workspace(tmp_path: Path) -> None:
@@ -61,6 +79,28 @@ def test_start_cli_launches_console_and_chrome_debug(monkeypatch, tmp_path: Path
         "port": 9222,
         "start_url": "https://my.greenhouse.io/jobs",
     }
+
+
+def test_build_cli_json_initializes_workspace_and_reports_frontend_state(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["build", "--workspace", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["entrypoint"] == "build"
+    assert payload["build_status"] == "ready"
+    assert payload["initialization"]["created"] is True
+    assert Path(payload["workspace"]["config_path"]).exists()
+    assert payload["frontend"]["reason"] == "source_unavailable"
+
+
+def test_start_cli_skip_frontend_build_requires_fresh_bundle(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SKIP_FRONTEND_BUILD", "1")
+    monkeypatch.setattr("findmyjob.cli.main.inspect_frontend_build_readiness", lambda *args, **kwargs: _blocked_frontend_readiness(tmp_path))
+
+    result = runner.invoke(app, ["start", "--workspace", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output
+    assert "SKIP_FRONTEND_BUILD was requested" in result.output
 
 
 def test_day_cli_json_requires_existing_workspace(tmp_path: Path) -> None:

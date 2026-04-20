@@ -479,8 +479,8 @@ async def test_preview_generic_form_handles_lever_fixture_without_clicking_submi
     async def fake_start_runtime():
         return object()
 
-    async def fake_open_browser_session(playwright):
-        _ = playwright
+    async def fake_open_browser_session(playwright, *, prefer_attached=False):
+        _ = (playwright, prefer_attached)
         return {'context': FakeContext(), 'page': page}
 
     async def fake_close_browser_session(session):

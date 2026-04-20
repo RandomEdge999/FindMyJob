@@ -61,5 +61,20 @@ web_*.log
 
 .claude
 .tools/
-\n+# Vulture allowlist
+
+# Vulture allowlist
 scripts/vulture_allowlist.py
+
+# Owner-only working notes and personal documents (never publish)
+claude.md
+sprint.md
+cv.md
+verify_output*.txt
+docs/sprint*_evidence_*.md
+
+# Owner-only secondary prototype workspace
+app-flow-opus/
+
+# Stray scratch HTML captures from manual portal testing
+tmp_lever_apply_*.html
+

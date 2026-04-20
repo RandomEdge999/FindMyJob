@@ -180,7 +180,18 @@ def _seed_workspace(tmp_path: Path) -> dict[str, str]:
 
 
 @pytest_asyncio.fixture()
-async def seeded_client(tmp_path: Path):
+async def seeded_client(tmp_path: Path, monkeypatch):
+    for key in [
+        'FMJ_EMAIL_OTP_ENABLED',
+        'FMJ_EMAIL_OTP_HOST',
+        'FMJ_EMAIL_OTP_PORT',
+        'FMJ_EMAIL_OTP_USERNAME',
+        'FMJ_EMAIL_OTP_PASSWORD_ENV',
+        'FMJ_EMAIL_OTP_PASSWORD',
+        'FMJ_EMAIL_OTP_FOLDER',
+        'FMJ_EMAIL_OTP_FROM_CONTAINS',
+    ]:
+        monkeypatch.delenv(key, raising=False)
     ids = _seed_workspace(tmp_path)
     transport = ASGITransport(app=create_app(tmp_path))
     async with httpx.AsyncClient(transport=transport, base_url='http://testserver') as client:
@@ -218,7 +229,7 @@ async def test_pages_render_spa_shell(seeded_client) -> None:
     for path in pages:
         response = await client.get(path)
         assert response.status_code == 200
-        assert 'Find My Job Console' in response.text
+        assert '<div id="root"></div>' in response.text
 
 
 @pytest.mark.asyncio
@@ -233,7 +244,13 @@ async def test_json_endpoints_return_operator_data(seeded_client) -> None:
 
     jobs_table = await client.get('/api/jobs/table')
     assert jobs_table.status_code == 200
-    assert any(item['company'] == 'Acme' for item in jobs_table.json()['items'])
+    jobs_payload = jobs_table.json()
+    job_row = next(item for item in jobs_payload['items'] if item['application_id'] == ids['review_application_id'])
+    assert job_row['company'] == 'Acme'
+    assert job_row['review_status'] == 'needs_user_input'
+    assert job_row['review_summary']['next_action'] == 'request_input'
+    assert job_row['review_summary']['blocker_count'] == 1
+    assert job_row['manual_handoff']['active'] is False
 
     live_status = await client.get('/api/live/status')
     assert live_status.status_code == 200
@@ -246,6 +263,43 @@ async def test_json_endpoints_return_operator_data(seeded_client) -> None:
     assert 'profile_surface' in setup_payload
     assert setup_payload['profile_surface']['mode'] in {'sample_mode', 'local_user_profile', 'advanced_local_overrides'}
 
+    reset_contract = await client.get('/api/workspace/reset-operational/contract')
+    assert reset_contract.status_code == 200
+    reset_contract_payload = reset_contract.json()
+    assert reset_contract_payload['ledger_exports']['configured_output_base'] == '.fmj/exports/ledger'
+    assert reset_contract_payload['history_after_reset']['review_history'] is False
+    assert reset_contract_payload['history_after_reset']['existing_ledger_exports'] is True
+
+    ledger_status = await client.get('/api/workspace/ledger-export')
+    assert ledger_status.status_code == 200
+    ledger_status_payload = ledger_status.json()
+    assert ledger_status_payload['configured_output_base'] == '.fmj/exports/ledger'
+    assert ledger_status_payload['generation']['supported'] is True
+    assert ledger_status_payload['exists'] is False
+
+    ledger_export = await client.post('/api/workspace/ledger-export')
+    assert ledger_export.status_code == 200
+    ledger_export_payload = ledger_export.json()
+    assert ledger_export_payload['generated'] is True
+    assert ledger_export_payload['exists'] is True
+    assert set(ledger_export_payload['generated_files']) == {
+        '.fmj/exports/accounts.csv',
+        '.fmj/exports/applications.csv',
+        '.fmj/exports/ledger.csv',
+        '.fmj/exports/ledger.xlsx',
+        '.fmj/exports/questions.csv',
+    }
+    assert ledger_export_payload['current_state']['applications'] >= 1
+    assert ledger_export_payload['last_generated_at']
+
+    ledger_status_after = await client.get('/api/workspace/ledger-export')
+    assert ledger_status_after.status_code == 200
+    assert ledger_status_after.json()['exists'] is True
+
+    reset_contract_after_export = await client.get('/api/workspace/reset-operational/contract')
+    assert reset_contract_after_export.status_code == 200
+    assert set(reset_contract_after_export.json()['ledger_exports']['existing_files']) == set(ledger_export_payload['existing_files'])
+
     autonomous = await client.get('/api/autonomous/status')
     assert autonomous.status_code == 200
     autonomous_payload = autonomous.json()
@@ -254,6 +308,15 @@ async def test_json_endpoints_return_operator_data(seeded_client) -> None:
     assert 'default_submit_mode' in autonomous_payload
     assert 'ready_to_apply_threshold' in autonomous_payload
     assert set(autonomous_payload['source_metrics']) >= {'greenhouse', 'lever', 'ashby'}
+
+    release_posture = await client.get('/api/release/posture')
+    assert release_posture.status_code == 200
+    release_payload = release_posture.json()
+    assert release_payload['phase'] == 'pre_launch'
+    assert any(item['id'] == 'linux_wsl_bash' and item['status'] == 'unsupported' for item in release_payload['platform_matrix'])
+    assert any(item['id'] == 'greenhouse_preview_first' and item['status'] == 'supported' for item in release_payload['feature_matrix'])
+    assert any(item['id'] == 'remote_provider_ui' and item['status'] == 'partially_supported' for item in release_payload['feature_matrix'])
+    assert any(item['id'] == 'email_otp' and item['status'] == 'disabled' for item in release_payload['gates'])
 
     queue = await client.get('/api/review/queue')
     assert queue.status_code == 200
@@ -793,21 +856,8 @@ async def test_settings_save_local_model_context_window(monkeypatch, seeded_clie
 
 
 @pytest.mark.asyncio
-async def test_settings_save_profile_forces_lmstudio_and_regenerate_dossier(monkeypatch, seeded_client) -> None:
+async def test_settings_save_profile_rejects_remote_writer_bindings(seeded_client) -> None:
     client, _ids, tmp_path = seeded_client
-
-    def fake_probe(base_url, *, timeout=15.0, api_key=None):
-        _ = (timeout, api_key)
-        requested = str(base_url or '').strip()
-        trimmed = requested[:-3] if requested.endswith('/v1') else requested
-        return ResolvedLocalBaseURL(
-            requested_url=requested or LMSTUDIO_DEFAULT_HOST,
-            canonical_base_url=f'{trimmed}/v1' if trimmed else f'{LMSTUDIO_DEFAULT_HOST}/v1',
-            candidates=(trimmed or LMSTUDIO_DEFAULT_HOST, f'{trimmed or LMSTUDIO_DEFAULT_HOST}/v1'),
-            models_payload={'data': [{'id': 'gemini-2.5-pro'}]},
-        )
-
-    monkeypatch.setattr('findmyjob.filefirst.advanced_models.probe_lmstudio_base_url', fake_probe)
 
     response = await client.post(
         '/api/settings/models',
@@ -822,21 +872,340 @@ async def test_settings_save_profile_forces_lmstudio_and_regenerate_dossier(monk
             'supports_structured_output': True,
         },
     )
-    assert response.status_code == 200
-    assert response.json()['saved'] is True
+    assert response.status_code == 400
+    assert 'Writer roles must use LM Studio local_http bindings' in response.json()['detail']
 
     workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
-    assert 'gemini-writer' in workspace_config
-    assert 'role = "writer"' in workspace_config
-    assert 'provider = "lmstudio"' in workspace_config
-    assert 'transport = "local_http"' in workspace_config
-    assert 'api_key_env' not in workspace_config
+    assert 'gemini-writer' not in workspace_config
 
-    dossier = await client.post('/api/profile/dossier/regenerate')
-    assert dossier.status_code == 200
-    payload = dossier.json()
+
+@pytest.mark.asyncio
+async def test_settings_save_profile_preserves_remote_provider_for_non_writer_roles(monkeypatch, seeded_client) -> None:
+    client, _ids, tmp_path = seeded_client
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-openrouter-key')
+
+    response = await client.post(
+        '/api/settings/models',
+        json={
+            'name': 'portable-qa',
+            'role': 'question_answerer',
+            'provider': 'openrouter',
+            'model': 'openai/gpt-4.1-mini',
+            'base_url': 'https://openrouter.ai/api/v1',
+            'transport': 'remote_http',
+            'api_key_env': 'OPENROUTER_API_KEY',
+            'supports_structured_output': False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
     assert payload['saved'] is True
-    assert (tmp_path / '.fmj' / 'local-overrides' / 'filefirst' / 'profile' / 'candidate-dossier.md').exists()
+    assert payload['model_profile']['provider'] == 'openrouter'
+    assert payload['model_profile']['transport'] == 'remote_http'
+    assert payload['model_profile']['api_key_env'] == 'OPENROUTER_API_KEY'
+
+    workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
+    assert 'portable-qa' in workspace_config
+    assert 'provider = "openrouter"' in workspace_config
+    assert 'transport = "remote_http"' in workspace_config
+    assert 'api_key_env = "OPENROUTER_API_KEY"' in workspace_config
+
+    settings = await client.get('/api/settings')
+    assert settings.status_code == 200
+    launch_roles = {
+        item['role']: item
+        for item in settings.json()['advanced_models']['launch_profile']['roles']
+    }
+    assert launch_roles['question_answerer']['provider'] == 'openrouter'
+    assert launch_roles['question_answerer']['transport'] == 'remote_http'
+    assert launch_roles['question_answerer']['status'] == 'warning'
+
+
+@pytest.mark.asyncio
+async def test_settings_save_model_family_updates_canonical_lmstudio_bindings(monkeypatch, seeded_client) -> None:
+    client, _ids, tmp_path = seeded_client
+
+    def fake_probe(base_url, *, timeout=15.0, api_key=None):
+        _ = (timeout, api_key)
+        requested = str(base_url or '').strip() or LMSTUDIO_DEFAULT_HOST
+        trimmed = requested[:-3] if requested.endswith('/v1') else requested
+        return ResolvedLocalBaseURL(
+            requested_url=requested,
+            canonical_base_url=f'{trimmed}/v1',
+            candidates=(trimmed, f'{trimmed}/v1'),
+            models_payload={'data': [{'id': 'gemma-4-E4B-it'}]},
+        )
+
+    monkeypatch.setattr('findmyjob.filefirst.advanced_models.probe_lmstudio_base_url', fake_probe)
+    monkeypatch.setattr('findmyjob.filefirst.service.probe_lmstudio_base_url', fake_probe)
+
+    response = await client.post(
+        '/api/settings/models/family',
+        json={
+            'family': 'screening',
+            'model': 'gemma-4-E4B-it',
+            'base_url': LMSTUDIO_DEFAULT_HOST,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['saved'] is True
+    assert payload['family'] == 'screening'
+    assert {profile['role'] for profile in payload['profiles']} == {'text_router', 'classifier', 'extractor'}
+    assert {profile['name'] for profile in payload['profiles']} == {
+        'lmstudio-screen-text-router',
+        'lmstudio-screen-classifier',
+        'lmstudio-screen-extractor',
+    }
+    assert all(profile['provider'] == 'lmstudio' for profile in payload['profiles'])
+    assert all(profile['transport'] == 'local_http' for profile in payload['profiles'])
+    assert all(profile['model'] == 'gemma-4-E4B-it' for profile in payload['profiles'])
+    assert all(profile['base_url'] == f'{LMSTUDIO_DEFAULT_HOST}/v1' for profile in payload['profiles'])
+
+    settings = await client.get('/api/settings')
+    assert settings.status_code == 200
+    settings_payload = settings.json()
+    assert settings_payload['advanced_models']['role_bindings']['text_router'] == 'lmstudio-screen-text-router'
+    assert settings_payload['advanced_models']['role_bindings']['classifier'] == 'lmstudio-screen-classifier'
+    assert settings_payload['advanced_models']['role_bindings']['extractor'] == 'lmstudio-screen-extractor'
+    launch_roles = {
+        item['role']: item['model']
+        for item in settings_payload['advanced_models']['launch_profile']['roles']
+    }
+    assert launch_roles['text_router'] == 'gemma-4-E4B-it'
+    assert launch_roles['classifier'] == 'gemma-4-E4B-it'
+    assert launch_roles['extractor'] == 'gemma-4-E4B-it'
+
+    workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
+    assert 'lmstudio-screen-text-router' in workspace_config
+    assert 'lmstudio-screen-classifier' in workspace_config
+    assert 'lmstudio-screen-extractor' in workspace_config
+    assert 'model = "gemma-4-E4B-it"' in workspace_config
+
+
+@pytest.mark.asyncio
+async def test_settings_save_model_family_allows_remote_screening_bindings(monkeypatch, seeded_client) -> None:
+    client, _ids, tmp_path = seeded_client
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-openrouter-key')
+
+    response = await client.post(
+        '/api/settings/models/family',
+        json={
+            'family': 'screening',
+            'provider': 'openrouter',
+            'transport': 'remote_http',
+            'model': 'openai/gpt-4.1-mini',
+            'base_url': 'https://openrouter.ai/api/v1',
+            'api_key_env': 'OPENROUTER_API_KEY',
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['saved'] is True
+    assert payload['family'] == 'screening'
+    assert all(profile['provider'] == 'openrouter' for profile in payload['profiles'])
+    assert all(profile['transport'] == 'remote_http' for profile in payload['profiles'])
+    assert all(profile['api_key_env'] == 'OPENROUTER_API_KEY' for profile in payload['profiles'])
+    assert all(profile['model'] == 'openai/gpt-4.1-mini' for profile in payload['profiles'])
+
+    settings = await client.get('/api/settings')
+    assert settings.status_code == 200
+    settings_payload = settings.json()
+    launch_roles = {
+        item['role']: item
+        for item in settings_payload['advanced_models']['launch_profile']['roles']
+    }
+    assert launch_roles['text_router']['provider'] == 'openrouter'
+    assert launch_roles['classifier']['provider'] == 'openrouter'
+    assert launch_roles['extractor']['provider'] == 'openrouter'
+    assert launch_roles['classifier']['status'] == 'warning'
+
+    workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
+    assert 'provider = "openrouter"' in workspace_config
+    assert 'transport = "remote_http"' in workspace_config
+    assert 'api_key_env = "OPENROUTER_API_KEY"' in workspace_config
+
+
+@pytest.mark.asyncio
+async def test_settings_save_model_family_rejects_unknown_family(seeded_client) -> None:
+    client, _ids, _tmp_path = seeded_client
+
+    response = await client.post(
+        '/api/settings/models/family',
+        json={
+            'family': 'openrouter',
+            'model': 'not-real',
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'Unknown model family' in response.json()['detail']
+
+
+@pytest.mark.asyncio
+async def test_settings_save_model_family_rejects_remote_drafting_bindings(seeded_client) -> None:
+    client, _ids, tmp_path = seeded_client
+
+    response = await client.post(
+        '/api/settings/models/family',
+        json={
+            'family': 'drafting',
+            'provider': 'openrouter',
+            'transport': 'remote_http',
+            'model': 'openai/gpt-4.1-mini',
+            'base_url': 'https://openrouter.ai/api/v1',
+            'api_key_env': 'OPENROUTER_API_KEY',
+        },
+    )
+
+    assert response.status_code == 400
+    assert 'Writer roles must use LM Studio local_http bindings' in response.json()['detail']
+
+    workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
+    assert 'openai/gpt-4.1-mini' not in workspace_config
+
+
+@pytest.mark.asyncio
+async def test_settings_export_excludes_personal_profile_data(seeded_client) -> None:
+    client, _ids, _tmp_path = seeded_client
+
+    response = await client.get('/api/settings/export')
+
+    assert response.status_code == 200
+    payload = response.json()
+    bundle = payload['bundle']
+    assert payload['exported'] is True
+    assert bundle['schema_version'] == 1
+    assert bundle['bundle_type'] == 'findmyjob_non_personal_settings'
+    assert 'profile' not in bundle
+    assert 'dossier' not in bundle
+    assert 'model_profiles' in bundle
+    assert 'tracked_companies' in bundle['portals']
+    assert any('Excludes candidate profile data' in line for line in bundle['notes'])
+
+
+@pytest.mark.asyncio
+async def test_settings_import_applies_non_personal_config(monkeypatch, seeded_client) -> None:
+    client, _ids, tmp_path = seeded_client
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-openrouter-key')
+
+    def fake_probe(base_url, *, timeout=15.0, api_key=None):
+        _ = (timeout, api_key)
+        requested = str(base_url or '').strip() or LMSTUDIO_DEFAULT_HOST
+        trimmed = requested[:-3] if requested.endswith('/v1') else requested
+        return ResolvedLocalBaseURL(
+            requested_url=requested,
+            canonical_base_url=f'{trimmed}/v1',
+            candidates=(trimmed, f'{trimmed}/v1'),
+            models_payload={'data': [{'id': 'gemma-4-E4B-it'}]},
+        )
+
+    monkeypatch.setattr('findmyjob.filefirst.service.probe_lmstudio_base_url', fake_probe)
+    monkeypatch.setattr('findmyjob.filefirst.advanced_models.probe_lmstudio_base_url', fake_probe)
+
+    response = await client.post(
+        '/api/settings/import',
+        json={
+            'bundle': {
+                'schema_version': 1,
+                'bundle_type': 'findmyjob_non_personal_settings',
+                'portals': {
+                    'sources': {
+                        'greenhouse': {'enabled': True, 'boards': ['acme'], 'seed_urls': [], 'seed_domains': []},
+                        'lever': {'enabled': True, 'boards': ['beta'], 'seed_urls': ['https://jobs.example.com'], 'seed_domains': ['jobs.example.com']},
+                        'ashby': {'enabled': False, 'boards': [], 'seed_urls': [], 'seed_domains': []},
+                    },
+                    'tracked_companies': [
+                        {'name': 'Acme', 'careers_url': 'https://acme.example/jobs', 'source': 'greenhouse', 'enabled': True},
+                    ],
+                },
+                'autonomous': {
+                    'enabled': True,
+                    'submit_enabled': False,
+                    'default_submit_mode': 'preview_first',
+                    'ready_to_apply_threshold': 17,
+                    'browser_mode': 'attached',
+                    'max_open_tabs': 4,
+                    'daily_submit_cap': 12,
+                    'per_company_daily_cap': 2,
+                    'production_sources': ['greenhouse', 'lever'],
+                    'browser_attach_enabled': True,
+                    'browser_cdp_url': 'http://127.0.0.1:9222',
+                    'captcha_strategy': 'skip',
+                    'captcha_provider': '2captcha',
+                    'captcha_api_key_env': 'CAPTCHA_API_KEY',
+                    'captcha_solve_timeout_seconds': 300,
+                },
+                'runtime_model': {
+                    'provider': 'lmstudio',
+                    'transport': 'local_http',
+                    'model': 'gemma-4-E4B-it',
+                    'base_url': LMSTUDIO_DEFAULT_HOST,
+                    'temperature': 0.1,
+                    'max_tokens': 2048,
+                    'preferred_context_window': 65536,
+                    'local': True,
+                },
+                'chatgpt_drafting': {
+                    'enabled': True,
+                    'gpt_url': 'https://chatgpt.com/g/g-findmyjob',
+                    'completion_start_marker': '[[START]]',
+                    'completion_end_marker': '[[END]]',
+                    'browser_mode': 'attached',
+                    'browser_cdp_url': 'http://127.0.0.1:9333',
+                    'launch_if_missing': True,
+                    'use_temporary_chat': True,
+                    'timeout_seconds': 600,
+                    'prompt_submit_delay_ms': 250,
+                    'download_timeout_seconds': 240,
+                    'max_parallel_jobs': 6,
+                    'make_default': True,
+                },
+                'model_profiles': [
+                    {
+                        'name': 'portable-qa',
+                        'role': 'question_answerer',
+                        'provider': 'openrouter',
+                        'transport': 'remote_http',
+                        'model': 'openai/gpt-4.1-mini',
+                        'base_url': 'https://openrouter.ai/api/v1',
+                        'api_key_env': 'OPENROUTER_API_KEY',
+                        'supports_structured_output': False,
+                    },
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['imported'] is True
+    assert set(payload['sections']) >= {'portals', 'autonomous', 'runtime_model', 'chatgpt_drafting', 'model_profiles'}
+    assert payload['model_profiles'] == ['portable-qa']
+
+    settings = await client.get('/api/settings')
+    assert settings.status_code == 200
+    settings_payload = settings.json()
+    assert settings_payload['autonomous']['ready_to_apply_threshold'] == 17
+    assert settings_payload['autonomous']['max_open_tabs'] == 4
+    assert settings_payload['chatgpt_drafting']['enabled'] is True
+    assert settings_payload['chatgpt_drafting']['gpt_url'] == 'https://chatgpt.com/g/g-findmyjob'
+    assert settings_payload['runtime_model']['model'] == 'gemma-4-E4B-it'
+    assert settings_payload['tracked_companies'][0]['name'] == 'Acme'
+    launch_roles = {
+        item['role']: item
+        for item in settings_payload['advanced_models']['launch_profile']['roles']
+    }
+    assert launch_roles['question_answerer']['provider'] == 'openrouter'
+    assert launch_roles['question_answerer']['status'] == 'warning'
+
+    workspace_config = (tmp_path / '.fmj' / 'config.toml').read_text(encoding='utf-8')
+    assert 'portable-qa' in workspace_config
+    assert 'provider = "openrouter"' in workspace_config
+    assert 'browser_mode = "attached"' in workspace_config
 
 
 @pytest.mark.asyncio

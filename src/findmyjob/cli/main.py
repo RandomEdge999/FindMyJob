@@ -17,6 +17,7 @@ from rich.table import Table
 from sqlalchemy import select
 
 from findmyjob import __version__
+from findmyjob.bootstrap import bootstrap_repo_environment
 from findmyjob.core.assets import ensure_default_workspace_templates
 from findmyjob.core.config import (
     AppConfig,
@@ -44,7 +45,7 @@ from findmyjob.core.workflow_snapshot import collect_workflow_snapshot, Workflow
 from findmyjob.cli.filefirst import register_filefirst_commands
 from findmyjob.filefirst import FileWorkspace
 from findmyjob.filefirst.readiness import collect_filefirst_release_snapshot, inspect_filefirst_readiness
-from findmyjob.web.frontend_sync import sync_frontend_bundle
+from findmyjob.web.frontend_sync import inspect_frontend_build_readiness, sync_frontend_bundle
 
 collect_release_snapshot = collect_filefirst_release_snapshot
 inspect_readiness = inspect_filefirst_readiness
@@ -118,6 +119,87 @@ def _version_payload() -> dict[str, str]:
         "python": sys.version.split()[0],
         "executable": sys.executable,
     }
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _cli_repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _supported_repo_python_paths() -> list[Path]:
+    root = _cli_repo_root()
+    candidates = [
+        root / ".venv312" / "Scripts" / "python.exe",
+        root / ".venv" / "Scripts" / "python.exe",
+        root / ".venv312" / "bin" / "python",
+        root / ".venv" / "bin" / "python",
+    ]
+    return [candidate.resolve() for candidate in candidates if candidate.exists()]
+
+
+def _build_python_contract_payload(workspace: Path) -> dict[str, Any]:
+    executable = Path(sys.executable).resolve()
+    expected_paths = _supported_repo_python_paths()
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    detail = f"active={executable} :: expected={', '.join(str(path) for path in expected_paths) or 'none'}"
+
+    if version != "3.12":
+        return {
+            "status": "blocked",
+            "summary": "Build path requires Python 3.12.",
+            "detail": f"python={version} :: {detail}",
+            "hint": "Activate the repo-local Python 3.12 virtual environment in `.venv312` or `.venv`, then rerun `python -m findmyjob build`.",
+            "python": version,
+            "executable": str(executable),
+            "expected_paths": [str(path) for path in expected_paths],
+        }
+
+    if not expected_paths:
+        return {
+            "status": "blocked",
+            "summary": "Repo-local Python 3.12 virtual environment is missing.",
+            "detail": detail,
+            "hint": "Create `.venv312` or `.venv` with Python 3.12, install the project, then rerun `python -m findmyjob build`.",
+            "python": version,
+            "executable": str(executable),
+            "expected_paths": [],
+        }
+
+    if executable not in expected_paths:
+        return {
+            "status": "blocked",
+            "summary": "Build command is not running inside the repo-local Python 3.12 environment.",
+            "detail": detail,
+            "hint": "Activate the repo-local Python 3.12 virtual environment in `.venv312` or `.venv`, then rerun `python -m findmyjob build`.",
+            "python": version,
+            "executable": str(executable),
+            "expected_paths": [str(path) for path in expected_paths],
+        }
+
+    return {
+        "status": "ok",
+        "summary": "Build command is running inside the supported repo-local Python 3.12 environment.",
+        "detail": detail,
+        "hint": None,
+        "python": version,
+        "executable": str(executable),
+        "expected_paths": [str(path) for path in expected_paths],
+    }
+
+
+def _ensure_build_python_contract_or_exit(workspace: Path) -> dict[str, Any]:
+    payload = _build_python_contract_payload(workspace)
+    if payload["status"] == "blocked":
+        console.print(f"Build environment check failed: {payload['summary']}")
+        console.print(payload["detail"])
+        hint = str(payload.get("hint") or "").strip()
+        if hint:
+            console.print(hint)
+        raise typer.Exit(code=1)
+    return payload
 
 
 def _render_report(title: str, report) -> None:
@@ -592,7 +674,7 @@ def _step_for_issue(issue: dict[str, Any]) -> str:
         "config.workspace_file": "Run `fmj start` to create the file-first workspace layout.",
         "workspace.config": "Run `fmj start` to create the file-first workspace layout.",
         "workspace.profile": "Review `config/profile.yml` and keep the LM Studio runtime settings correct.",
-        "profile.local_user_profile": "Copy `templates/user-profile.local.example.yml` to `.fmj/local-overrides/filefirst/user-profile.yml` and fill in your real local candidate data.",
+        "profile.local_user_profile": "Open the local Setup page at `/setup` to save your basic profile, or edit `.fmj/local-overrides/filefirst/user-profile.yml` directly if you prefer the file-first path.",
         "workspace.portals": "Review `portals.yml` and keep the enabled Greenhouse, Lever, and Ashby sources aligned with the launch scope.",
         "profile.facts": "Run `fmj onboard export-file-first --workspace .` to populate file-first facts.",
         "workspace.cv": "Run `fmj onboard export-file-first --workspace .` to populate `cv.md`.",
@@ -616,9 +698,10 @@ def _step_for_issue(issue: dict[str, Any]) -> str:
         "privacy.trace_capture": "Disable trace and DOM capture in `config/profile.yml` for the launch workspace.",
         "runtime.playwright.package": "Install browser support in the project environment with `python -m pip install -e .[models,playwright]`.",
         "runtime.playwright.browser": "Run `python -m playwright install chromium` before browser preview or rehearsal flows.",
+        "runtime.frontend.bundle": "Run `fmj build` to refresh the local frontend, or install Node.js first if the frontend bundle cannot be rebuilt.",
         "personal.onboarding": "Run `fmj onboard export-file-first --workspace .` to populate the file-first workspace.",
         "profile.contact_facts": "Run `fmj onboard export-file-first --workspace .` so contact facts exist for resumes and apply flows.",
-        "profile.authorization_facts": "Confirm your authorization details are present in the exported file-first facts.",
+        "profile.authorization_facts": "Use `/setup` to save your authorization defaults, or confirm the details exist in your local file-first facts.",
         "artifacts.cv": "Replace the default `cv.md` placeholder with your exported or canonical CV content.",
         "models.router": "Install the recommended LM Studio split profiles and confirm the local server is reachable.",
         "models.runtime.config": "Set the LM Studio host and model in `config/profile.yml`.",
@@ -649,7 +732,9 @@ def _recommended_next_steps(
 ) -> list[str]:
     steps: list[str] = []
     blocked_present = any(str(issue.get("status") or "") == "blocked" for issue in issues)
-    if mode == "start" and initialized:
+    if mode == "build" and initialized:
+        steps.append("Run `fmj start` after the build path is ready, then use `/setup` to clear any remaining readiness blockers.")
+    elif mode == "start" and initialized:
         steps.append("Use the Dashboard as the main landing page, then run the daily dry-run workflow.")
     elif mode == "start" and blocked_present:
         steps.append("Open the Setup page in the local console to work through the remaining blockers.")
@@ -664,9 +749,59 @@ def _recommended_next_steps(
     if not steps:
         if mode == "day":
             steps.append("Open the Daily page, run the daily dry-run, and continue into review as needed.")
+        elif mode == "build":
+            steps.append("Run `fmj start` to open the local console once the build path is ready.")
         else:
             steps.append("Open the Dashboard and use `fmj day` as the normal daily dry-run entrypoint.")
     return steps[:5]
+
+
+def _render_build_summary(payload: dict[str, Any]) -> None:
+    console.print()
+    console.rule("[bold]Build [READY][/bold]")
+
+    workspace = payload.get("workspace") or {}
+    console.print(f"  Workspace: {workspace.get('path')}")
+    console.print(f"  Launch readiness: {str(payload.get('status', 'unknown')).upper()}")
+
+    python_payload = payload.get("python") or {}
+    console.print(f"  Python: {python_payload.get('python')} ({python_payload.get('executable')})")
+
+    initialization = payload.get("initialization") or {}
+    console.print(f"  Workspace state: {initialization.get('status')}")
+    created_templates = list(initialization.get("created_templates") or [])
+    if created_templates:
+        console.print(f"  Seeded templates: {', '.join(created_templates)}")
+
+    frontend = payload.get("frontend") or {}
+    frontend_state = "rebuilt" if frontend.get("built") else "checked"
+    if frontend.get("skip_requested"):
+        frontend_state = "checked (skip requested)"
+    console.print(f"  Frontend: {frontend_state} [{frontend.get('reason')}] -> {frontend.get('dist_dir')}")
+
+    readiness = payload.get("readiness") or {}
+    if readiness.get("config_validation") is not None:
+        console.print(f"  Config validation: {readiness['config_validation']['overall_status']}")
+    if readiness.get("doctor") is not None:
+        console.print(f"  Doctor: {readiness['doctor']['overall_status']}")
+    if readiness.get("launch_check") is not None:
+        console.print(f"  Launch check: {readiness['launch_check']['overall_status']}")
+    if readiness.get("launch_profile") is not None:
+        console.print(f"  Model launch profile: {readiness['launch_profile']['overall_status']}")
+
+    issues = list(payload.get("issues") or [])
+    if issues:
+        console.print("  Remaining blockers and warnings:")
+        for issue in issues[:6]:
+            label = "BLOCKED" if issue.get("status") == "blocked" else "WARNING"
+            console.print(f"    - {label}: {issue.get('summary')}")
+
+    next_steps = list(payload.get("next_steps") or [])
+    if next_steps:
+        console.print("  Next steps:")
+        for step in next_steps:
+            console.print(f"    - {step}")
+    console.print()
 
 
 def _build_missing_workspace_payload(
@@ -962,7 +1097,15 @@ def _maybe_launch_chatgpt_startup_browser(payload: dict[str, Any], *, workspace:
 
 
 def _sync_web_frontend_or_exit() -> None:
-    if str(os.getenv("SKIP_FRONTEND_BUILD") or "").strip().lower() in {"1", "true", "yes"}:
+    if _truthy_env(os.getenv("SKIP_FRONTEND_BUILD")):
+        readiness = inspect_frontend_build_readiness()
+        if readiness.bundle_status.needs_build:
+            message = (
+                "SKIP_FRONTEND_BUILD was requested, but the existing frontend bundle is stale or missing. "
+                f"{readiness.hint or 'Run `fmj build` without `--skip-frontend-build` before retrying.'}"
+            )
+            console.print(f"Web frontend sync failed: {message}")
+            raise typer.Exit(code=1)
         return
     try:
         sync_frontend_bundle()
@@ -979,6 +1122,108 @@ def init(workspace: Path = typer.Option(Path.cwd(), help="Workspace root")) -> N
     ensure_default_workspace_templates(workspace)
     runtime(workspace)
     console.print(f"Workspace initialized at {workspace}")
+
+
+@app.command("bootstrap")
+def bootstrap(
+    workspace: Path = typer.Option(Path.cwd(), help="Repository root"),
+    venv_dir: Path | None = typer.Option(None, help="Override the repo-local virtual environment path."),
+    install_playwright_browser: bool = typer.Option(
+        True,
+        "--install-playwright-browser/--skip-playwright-browser",
+        help="Install Chromium into the repo-local environment during bootstrap.",
+    ),
+    force_install: bool = typer.Option(False, "--force-install", help="Reinstall the editable package even if the repo-local environment already looks ready."),
+    json_output: bool = typer.Option(False, "--json", help="Emit bootstrap details as JSON."),
+) -> None:
+    """Create or repair the repo-local Python environment used by the public launch scripts."""
+    payload = bootstrap_repo_environment(
+        project_root=workspace.resolve(),
+        venv_dir=venv_dir.resolve() if venv_dir is not None else None,
+        install_playwright_browser=install_playwright_browser,
+        force_install=force_install,
+    )
+    if json_output:
+        console.print_json(json.dumps(payload, default=str))
+        return
+    console.print(payload["summary"])
+
+
+@app.command("build")
+def build(
+    workspace: Path = typer.Option(Path.cwd(), help="Workspace root"),
+    skip_frontend_build: bool = typer.Option(False, "--skip-frontend-build", help="Require an already-fresh frontend bundle instead of rebuilding it."),
+    json_output: bool = typer.Option(False, "--json", help="Emit build and launch-readiness details as JSON."),
+) -> None:
+    """Prepare the local workspace and refresh the launchable frontend bundle."""
+    root = workspace.resolve()
+    python_payload = _ensure_build_python_contract_or_exit(root)
+    initialization = _initialize_workspace_for_start(root)
+
+    frontend_skip_requested = skip_frontend_build or _truthy_env(os.getenv("SKIP_FRONTEND_BUILD"))
+    if frontend_skip_requested:
+        readiness = inspect_frontend_build_readiness(root)
+        if readiness.bundle_status.needs_build:
+            message = (
+                "SKIP_FRONTEND_BUILD was requested, but the existing frontend bundle is stale or missing. "
+                f"{readiness.hint or 'Run `fmj build` without `--skip-frontend-build` before retrying.'}"
+            )
+            console.print(f"Web frontend sync failed: {message}")
+            raise typer.Exit(code=1)
+        frontend_payload = {
+            "checked": readiness.bundle_status.reason != "source_unavailable",
+            "built": False,
+            "reason": readiness.bundle_status.reason,
+            "frontend_root": str(readiness.bundle_status.frontend_root),
+            "dist_dir": str(readiness.bundle_status.dist_dir),
+            "skip_requested": True,
+        }
+    else:
+        try:
+            frontend_result = sync_frontend_bundle(root)
+        except RuntimeError as exc:
+            console.print(f"Web frontend sync failed: {exc}")
+            raise typer.Exit(code=1) from exc
+        frontend_payload = {
+            "checked": frontend_result.checked,
+            "built": frontend_result.built,
+            "reason": frontend_result.reason,
+            "frontend_root": str(frontend_result.frontend_root),
+            "dist_dir": str(frontend_result.dist_dir),
+            "skip_requested": False,
+        }
+
+    release_snapshot = collect_filefirst_release_snapshot(root)
+    onboarding = _summarize_onboarding(root)
+    issues = _collect_entrypoint_issues(release_snapshot, onboarding)
+    payload = {
+        "entrypoint": "build",
+        "build_status": "ready",
+        "status": _entrypoint_status(issues),
+        "workspace": {
+            "path": str(root),
+            "config_path": str(release_snapshot.config_path),
+        },
+        "python": python_payload,
+        "initialization": initialization,
+        "frontend": frontend_payload,
+        "readiness": {
+            "config_validation": _report_payload(release_snapshot.config_validation),
+            "doctor": _report_payload(release_snapshot.doctor),
+            "launch_check": _launch_payload(release_snapshot.launch_check),
+            "launch_profile": _model_launch_profile_payload(release_snapshot.launch_profile),
+        },
+        "onboarding": onboarding,
+        "issues": issues,
+        "next_steps": _recommended_next_steps(issues, mode="build", initialized=bool(initialization.get("created"))),
+        "notes": list(release_snapshot.notes[:5]),
+    }
+
+    if json_output:
+        console.print_json(json.dumps(payload, default=str))
+        return
+
+    _render_build_summary(payload)
 
 
 @app.command("start")

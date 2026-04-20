@@ -10,6 +10,7 @@ import imaplib
 import os
 import re
 import time
+from typing import Any
 
 
 _GREENHOUSE_CODE_PATTERN = re.compile(
@@ -58,22 +59,104 @@ class GreenhouseApplicationReceipt:
     body_snippet: str | None = None
 
 
-def load_email_otp_settings() -> EmailOtpSettings | None:
-    enabled = str(os.environ.get("FMJ_EMAIL_OTP_ENABLED") or "").strip().casefold()
-    if enabled not in {"1", "true", "yes", "on"}:
-        return None
+def inspect_email_otp_configuration() -> dict[str, Any]:
+    enabled = _env_truthy("FMJ_EMAIL_OTP_ENABLED")
     host = str(os.environ.get("FMJ_EMAIL_OTP_HOST") or "").strip()
     username = str(os.environ.get("FMJ_EMAIL_OTP_USERNAME") or "").strip()
     password_env = str(os.environ.get("FMJ_EMAIL_OTP_PASSWORD_ENV") or "").strip()
-    password = str(os.environ.get(password_env) or "").strip() if password_env else str(os.environ.get("FMJ_EMAIL_OTP_PASSWORD") or "").strip()
+    direct_password = str(os.environ.get("FMJ_EMAIL_OTP_PASSWORD") or "").strip()
+    password = str(os.environ.get(password_env) or "").strip() if password_env else direct_password
     if "gmail" in host.casefold() and password:
         password = re.sub(r"\s+", "", password)
-    if not host or not username or not password:
-        return None
+    folder = str(os.environ.get("FMJ_EMAIL_OTP_FOLDER") or "INBOX").strip() or "INBOX"
+    from_contains = str(os.environ.get("FMJ_EMAIL_OTP_FROM_CONTAINS") or "greenhouse").strip() or "greenhouse"
     try:
         port = int(os.environ.get("FMJ_EMAIL_OTP_PORT") or 993)
     except (TypeError, ValueError):
         port = 993
+
+    warnings: list[str] = []
+    missing: list[str] = []
+    credential_source = "disabled"
+    if enabled:
+        if password_env:
+            credential_source = "env_reference"
+            if not str(os.environ.get(password_env) or "").strip():
+                credential_source = "env_reference_missing"
+                warnings.append(
+                    f"`FMJ_EMAIL_OTP_PASSWORD_ENV` points to `{password_env}`, but that environment variable is not set."
+                )
+        elif direct_password:
+            credential_source = "direct_env"
+            warnings.append(
+                "Mailbox credentials are being read from `FMJ_EMAIL_OTP_PASSWORD`. Prefer `FMJ_EMAIL_OTP_PASSWORD_ENV` so shared `.env` files can reference a local-only secret name instead of a real mailbox password."
+            )
+        else:
+            credential_source = "missing"
+
+        if not host:
+            missing.append("FMJ_EMAIL_OTP_HOST")
+        if not username:
+            missing.append("FMJ_EMAIL_OTP_USERNAME")
+        if not password:
+            missing.append(password_env or "FMJ_EMAIL_OTP_PASSWORD")
+        if from_contains.casefold() != "greenhouse":
+            warnings.append(
+                "Email OTP sender filtering no longer uses the default `greenhouse` scope. Review mailbox filtering carefully before relying on this path."
+            )
+
+    if not enabled:
+        status = "disabled"
+    elif missing:
+        status = "misconfigured"
+    else:
+        status = "ready"
+
+    summary = {
+        "disabled": "Greenhouse email OTP is disabled.",
+        "misconfigured": "Greenhouse email OTP is enabled but not fully configured.",
+        "ready": "Greenhouse email OTP is enabled and can poll a live IMAP mailbox.",
+    }[status]
+
+    return {
+        "enabled": enabled,
+        "status": status,
+        "configured": status == "ready",
+        "purpose": "greenhouse_verification_only",
+        "summary": summary,
+        "host": host or None,
+        "port": port,
+        "folder": folder,
+        "from_contains": from_contains,
+        "username_configured": bool(username),
+        "credential_source": credential_source,
+        "password_env_name": password_env or None,
+        "missing": missing,
+        "warnings": warnings,
+        "reads": [
+            "FMJ_EMAIL_OTP_ENABLED",
+            "FMJ_EMAIL_OTP_HOST",
+            "FMJ_EMAIL_OTP_PORT",
+            "FMJ_EMAIL_OTP_USERNAME",
+            "FMJ_EMAIL_OTP_PASSWORD_ENV or FMJ_EMAIL_OTP_PASSWORD",
+            "FMJ_EMAIL_OTP_FOLDER",
+            "FMJ_EMAIL_OTP_FROM_CONTAINS",
+            "FMJ_EMAIL_OTP_TIMEOUT_SECONDS",
+            "FMJ_EMAIL_OTP_POLL_SECONDS",
+            "FMJ_EMAIL_OTP_MAX_MESSAGES",
+        ],
+        "responsibilities": [
+            "This path is optional and intended only for Greenhouse verification or receipt polling.",
+            "Mailbox credentials stay outside tracked config and are read from the local environment at runtime.",
+            "Operators are responsible for mailbox access, retention, and any non-default sender filters they configure.",
+        ],
+    }
+
+
+def load_email_otp_settings() -> EmailOtpSettings | None:
+    audit = inspect_email_otp_configuration()
+    if audit["status"] != "ready":
+        return None
     try:
         timeout_seconds = max(5, int(os.environ.get("FMJ_EMAIL_OTP_TIMEOUT_SECONDS") or 90))
     except (TypeError, ValueError):
@@ -87,16 +170,33 @@ def load_email_otp_settings() -> EmailOtpSettings | None:
     except (TypeError, ValueError):
         max_messages = 20
     return EmailOtpSettings(
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        folder=str(os.environ.get("FMJ_EMAIL_OTP_FOLDER") or "INBOX").strip() or "INBOX",
-        from_contains=str(os.environ.get("FMJ_EMAIL_OTP_FROM_CONTAINS") or "greenhouse").strip() or "greenhouse",
+        host=str(audit["host"] or "").strip(),
+        port=int(audit["port"]),
+        username=str(os.environ.get("FMJ_EMAIL_OTP_USERNAME") or "").strip(),
+        password=_resolved_email_otp_password(audit),
+        folder=str(audit["folder"] or "INBOX"),
+        from_contains=str(audit["from_contains"] or "greenhouse"),
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
         max_messages=max_messages,
     )
+
+
+def _env_truthy(name: str) -> bool:
+    value = str(os.environ.get(name) or "").strip().casefold()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _resolved_email_otp_password(audit: dict[str, Any]) -> str:
+    password_env = str(audit.get("password_env_name") or "").strip()
+    if password_env:
+        password = str(os.environ.get(password_env) or "").strip()
+    else:
+        password = str(os.environ.get("FMJ_EMAIL_OTP_PASSWORD") or "").strip()
+    host = str(audit.get("host") or "")
+    if "gmail" in host.casefold() and password:
+        password = re.sub(r"\s+", "", password)
+    return password
 
 
 def fetch_greenhouse_security_code(

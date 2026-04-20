@@ -6,6 +6,14 @@
 # The public repo ships fictional tracked sample data. This local file is the
 # recommended place to put your real candidate information without editing
 # tracked files directly.
+#
+# Scope note:
+# - This file is for reusable candidate, target, authorization, education,
+#   language, fact, and default-answer data.
+# - It does not configure LM Studio URLs, automation policy, submit mode, or
+#   ChatGPT drafting. Keep those runtime settings in
+#   `.fmj/local-overrides/filefirst/config/profile.yml` or save them from the
+#   Settings page.
 
 candidate:
   name: Your Name

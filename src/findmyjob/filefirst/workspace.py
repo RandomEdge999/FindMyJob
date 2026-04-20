@@ -524,6 +524,38 @@ def _build_user_profile_facts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _merge_user_profile_fact_rows(
+    user_profile_rows: list[dict[str, Any]],
+    local_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = [deepcopy(row) for row in user_profile_rows if isinstance(row, dict)]
+    protected_fact_ids = {
+        str(row.get("fact_id") or "").strip()
+        for row in merged
+        if str(row.get("fact_id") or "").strip() in {"contact.primary", "location.primary", "authorization.primary"}
+    }
+    index_by_fact_id = {
+        str(row.get("fact_id") or "").strip(): index
+        for index, row in enumerate(merged)
+        if str(row.get("fact_id") or "").strip()
+    }
+
+    for row in local_rows or []:
+        if not isinstance(row, dict):
+            continue
+        fact_id = str(row.get("fact_id") or "").strip()
+        if fact_id and fact_id in protected_fact_ids:
+            continue
+        if fact_id and fact_id in index_by_fact_id:
+            merged[index_by_fact_id[fact_id]] = deepcopy(row)
+            continue
+        if fact_id:
+            index_by_fact_id[fact_id] = len(merged)
+        merged.append(deepcopy(row))
+
+    return merged
+
+
 def _build_user_profile_answer_memory(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in payload.get("default_answers") or []:
@@ -829,6 +861,14 @@ class FileWorkspace:
         payload = _read_yaml(self.user_profile_path) or {}
         return payload if isinstance(payload, dict) else {}
 
+    def save_user_profile(self, payload: dict[str, Any]) -> None:
+        self.ensure()
+        body = payload if isinstance(payload, dict) else {}
+        self._save_local_only_target(self.user_profile_path).write_text(
+            _yaml_dump(body),
+            encoding="utf-8",
+        )
+
     def user_profile_surface(self) -> dict[str, Any]:
         self.ensure()
         advanced_paths = [
@@ -893,14 +933,15 @@ class FileWorkspace:
 
     def load_facts(self) -> list[FileFact]:
         self.ensure()
+        user_profile_payload = self.load_user_profile()
+        user_profile_rows = _build_user_profile_facts(user_profile_payload) if user_profile_payload else []
         if self.local_facts_path.exists():
             payload = _read_yaml(self.local_facts_path) or {}
             rows = payload.get("facts", []) if isinstance(payload, dict) else payload
-            return [FileFact.model_validate(row) for row in rows or []]
-        user_profile_payload = self.load_user_profile()
+            merged_rows = _merge_user_profile_fact_rows(user_profile_rows, rows or [])
+            return [FileFact.model_validate(row) for row in merged_rows or []]
         if user_profile_payload:
-            rows = _build_user_profile_facts(user_profile_payload)
-            return [FileFact.model_validate(row) for row in rows or []]
+            return [FileFact.model_validate(row) for row in user_profile_rows or []]
         payload = _read_yaml(self.facts_path) or {}
         rows = payload.get("facts", []) if isinstance(payload, dict) else payload
         return [FileFact.model_validate(row) for row in rows or []]

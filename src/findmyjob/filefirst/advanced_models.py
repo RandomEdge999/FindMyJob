@@ -15,6 +15,7 @@ from findmyjob.core.lmstudio import (
     LMSTUDIO_AUTO_MODEL,
     LMSTUDIO_DEFAULT_HOST,
     LMSTUDIO_PROVIDER,
+    lmstudio_available_model_ids,
     probe_lmstudio_base_url,
     resolve_lmstudio_model_id_or_default,
 )
@@ -27,6 +28,19 @@ DEFAULT_REMOTE_MAX_TOKENS = 8192
 LMSTUDIO_SCREEN_PREFIX = "lmstudio-screen"
 LMSTUDIO_DRAFT_PREFIX = "lmstudio-draft"
 _FAST_LMSTUDIO_PROBE_TIMEOUT_SECONDS = 0.75
+_MODEL_FAMILY_ROLES: dict[str, tuple[ModelRole, ...]] = {
+    "screening": (
+        ModelRole.TEXT_ROUTER,
+        ModelRole.CLASSIFIER,
+        ModelRole.EXTRACTOR,
+    ),
+    "drafting": (
+        ModelRole.WRITER,
+        ModelRole.RESUME_WRITER,
+        ModelRole.COVER_LETTER_WRITER,
+    ),
+    "qa": (ModelRole.QUESTION_ANSWERER,),
+}
 
 
 def _lmstudio_profile(
@@ -62,9 +76,7 @@ def _is_legacy_local_binding(profile: ModelProfile) -> bool:
 
 
 def _is_launch_contract_profile(profile: ModelProfile) -> bool:
-    provider = str(profile.provider or "").strip().lower()
-    transport = str(profile.transport or "").strip().lower()
-    return provider == LMSTUDIO_PROVIDER and transport == "local_http"
+    return not _is_legacy_local_binding(profile)
 
 
 
@@ -104,6 +116,11 @@ def _split_model_defaults_cached(
         screening_model = (
             resolve_lmstudio_model_id_or_default(screening_model, discovered.models_payload) or screening_model
         )
+        if screening_model == writer_model:
+            available = lmstudio_available_model_ids(discovered.models_payload)
+            alternatives = [m for m in available if m != writer_model]
+            if alternatives:
+                screening_model = alternatives[0]
     except Exception:
         pass
     effective_max_tokens = max(DEFAULT_REMOTE_MAX_TOKENS, int(max_tokens or 0))
@@ -198,8 +215,8 @@ def _effective_model_config(workspace: FileWorkspace | Path) -> AppConfig:
         config = AppConfig()
     default_profiles = _default_profiles_for_router(ws)
     merged_models: dict[str, ModelProfile] = {}
-    # Only LM Studio-local bindings participate in the launch router.
-    # Legacy remote or process profiles are ignored instead of remaining live.
+    # All non-legacy workspace profiles participate in launch inspection.
+    # The router decides whether a given binding is pass / warning / fail.
     for name, profile in config.models.items():
         if _is_legacy_local_binding(profile):
             continue
@@ -305,6 +322,9 @@ def advanced_models_payload(workspace: FileWorkspace | Path) -> dict[str, Any]:
     inspection = router.inspect_profiles()
     launch_profile = router.inspect_launch_profile()
     role_bindings: dict[str, str] = {}
+    for role_status in launch_profile.roles:
+        if role_status.profile_name:
+            role_bindings[role_status.role] = role_status.profile_name
     for profile in config.models.values():
         role_bindings.setdefault(profile.role.value, profile.name)
     payload.update(
@@ -335,6 +355,67 @@ def install_recommended_split_profiles(workspace: FileWorkspace | Path) -> dict[
     return {
         "saved": True,
         "installed": installed,
+    }
+
+
+def save_workspace_model_family(
+    workspace: FileWorkspace | Path,
+    family_id: str,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    provider: str | None = None,
+    transport: str | None = None,
+    api_key_env: str | None = None,
+) -> dict[str, Any]:
+    ws = workspace if isinstance(workspace, FileWorkspace) else FileWorkspace(Path(workspace))
+    ws.ensure()
+
+    normalized_family = str(family_id or "").strip().lower()
+    roles = _MODEL_FAMILY_ROLES.get(normalized_family)
+    if not roles:
+        raise ValueError(f"Unknown model family: {family_id}")
+
+    defaults = split_model_defaults(_local_model_settings(ws))
+    saved_profiles: list[dict[str, Any]] = []
+    resolved_model = str(model or "").strip()
+    resolved_base_url = str(base_url or "").strip()
+    resolved_provider = str(provider or "").strip()
+    resolved_transport = str(transport or "").strip()
+    resolved_api_key_env = str(api_key_env or "").strip()
+
+    for role in roles:
+        default_entry = next(
+            (
+                (name, payload)
+                for name, payload in defaults.items()
+                if str(payload.get("role") or "").strip() == role.value
+            ),
+            None,
+        )
+        if default_entry is None:
+            raise ValueError(f"No default LM Studio profile template exists for role: {role.value}")
+        name, payload = default_entry
+        updated_payload = copy.deepcopy(payload)
+        if resolved_model:
+            updated_payload["model"] = resolved_model
+        if resolved_base_url:
+            updated_payload["base_url"] = resolved_base_url
+        if resolved_provider:
+            updated_payload["provider"] = resolved_provider
+        if resolved_transport:
+            updated_payload["transport"] = resolved_transport
+        if resolved_api_key_env:
+            updated_payload["api_key_env"] = resolved_api_key_env
+        elif resolved_transport == "local_http":
+            updated_payload["api_key_env"] = None
+        profile = save_workspace_model_profile(ws, name, updated_payload)
+        saved_profiles.append(profile.model_dump(mode="json"))
+
+    return {
+        "saved": True,
+        "family": normalized_family,
+        "profiles": saved_profiles,
     }
 
 

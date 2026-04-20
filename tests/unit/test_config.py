@@ -98,6 +98,34 @@ def test_inspect_app_config_blocks_invalid_remote_model_profile(tmp_path: Path) 
     assert {finding.key for finding in report.findings} >= {"models.remote-writer.base_url", "models.remote-writer.api_key_env"}
 
 
+def test_inspect_app_config_blocks_misconfigured_greenhouse_email_otp(monkeypatch, tmp_path: Path) -> None:
+    config_path = workspace_config_file(tmp_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_default_workspace_config(config_path)
+    monkeypatch.setenv("FMJ_EMAIL_OTP_ENABLED", "true")
+    monkeypatch.setenv("FMJ_EMAIL_OTP_HOST", "imap.example.com")
+    monkeypatch.setenv("FMJ_EMAIL_OTP_USERNAME", "candidate@example.com")
+    monkeypatch.delenv("FMJ_EMAIL_OTP_PASSWORD_ENV", raising=False)
+    monkeypatch.delenv("FMJ_EMAIL_OTP_PASSWORD", raising=False)
+
+    _, report = inspect_app_config(tmp_path)
+
+    assert any(finding.key == "email_otp.configuration" and finding.status == "blocked" for finding in report.findings)
+
+
+def test_inspect_app_config_warns_when_greenhouse_live_submit_is_enabled(tmp_path: Path) -> None:
+    config_path = workspace_config_file(tmp_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    write_default_workspace_config(config_path)
+    doc = parse(config_path.read_text(encoding="utf-8"))
+    doc["sources"]["greenhouse"]["submit_enabled"] = True
+    config_path.write_text(doc.as_string(), encoding="utf-8")
+
+    _, report = inspect_app_config(tmp_path)
+
+    assert any(finding.key == "autonomous.live_submit" and finding.status == "warning" for finding in report.findings)
+
+
 def test_inspect_app_config_parses_privacy_settings(tmp_path: Path) -> None:
     config_path = workspace_config_file(tmp_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)

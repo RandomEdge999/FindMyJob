@@ -165,6 +165,55 @@ def test_launch_profile_fails_when_required_role_uses_remote_transport() -> None
     assert "launch contract requires LM Studio local_http transport" in writer.issues
 
 
+def test_launch_profile_accepts_openrouter_for_screening_and_qa_roles() -> None:
+    # Phase 4/6: screening + question-answering roles may run on OpenRouter (remote_http).
+    config = AppConfig(
+        models={
+            "writer": ModelProfile(
+                name="writer",
+                role=ModelRole.WRITER,
+                provider="lmstudio",
+                model="qwen3-8b",
+                transport="local_http",
+                local=True,
+                base_url="http://127.0.0.1:1234/v1",
+            ),
+            "classifier": ModelProfile(
+                name="classifier",
+                role=ModelRole.CLASSIFIER,
+                provider="openrouter",
+                model="meta-llama/llama-3.1-8b-instruct",
+                transport="remote_http",
+                local=False,
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env="OPENROUTER_API_KEY",
+            ),
+            "qa": ModelProfile(
+                name="qa",
+                role=ModelRole.QUESTION_ANSWERER,
+                provider="openrouter",
+                model="meta-llama/llama-3.1-8b-instruct",
+                transport="remote_http",
+                local=False,
+                base_url="https://openrouter.ai/api/v1",
+                api_key_env="OPENROUTER_API_KEY",
+            ),
+        }
+    )
+    router = ModelRouter(config)
+
+    report = router.inspect_launch_profile()
+
+    classifier = next(role for role in report.roles if role.role == "classifier")
+    qa = next(role for role in report.roles if role.role == "question_answerer")
+    # Should not be 'fail' just for running remote; readiness may still warn about missing secret.
+    assert classifier.status != "fail"
+    assert qa.status != "fail"
+    # And no launch-contract hard-fail risk should fire on these roles.
+    assert not any("classifier profile" in risk and "not using" in risk for risk in report.risks)
+    assert not any("question_answerer profile" in risk and "not using" in risk for risk in report.risks)
+
+
 def test_generate_text_surfaces_provider_error_payload(monkeypatch) -> None:
     profile = ModelProfile(
         name="lmstudio-draft-cover-letter-writer",
@@ -299,3 +348,49 @@ def test_fetch_local_model_catalog_dedupes_concurrent_requests(monkeypatch) -> N
 
     assert calls == ['http://127.0.0.1:1234/v1/models']
     assert results == [payload, payload]
+
+
+def test_discover_remote_http_models_returns_ids_from_openrouter_style_payload(monkeypatch) -> None:
+    router = ModelRouter(AppConfig())
+    captured_headers: dict[str, str] = {}
+    captured_url: dict[str, str] = {}
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, list[dict[str, str]]]:
+            return {
+                'data': [
+                    {'id': 'meta-llama/llama-3.1-8b-instruct'},
+                    {'id': 'anthropic/claude-3.5-sonnet'},
+                    {'id': 'meta-llama/llama-3.1-8b-instruct'},  # duplicate
+                ]
+            }
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            captured_headers.update(kwargs.get('headers') or {})
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            captured_url['url'] = url
+            return _Response()
+
+    monkeypatch.setattr('findmyjob.model_router.router.httpx.AsyncClient', _FakeClient)
+
+    ids = anyio.run(
+        lambda: router.discover_remote_http_models(
+            base_url='https://openrouter.ai/api/v1',
+            api_key='sk-test',
+        )
+    )
+
+    assert ids == ['meta-llama/llama-3.1-8b-instruct', 'anthropic/claude-3.5-sonnet']
+    assert captured_url['url'] == 'https://openrouter.ai/api/v1/models'
+    assert captured_headers.get('Authorization') == 'Bearer sk-test'

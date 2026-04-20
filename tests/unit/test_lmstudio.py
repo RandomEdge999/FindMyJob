@@ -13,7 +13,7 @@ from findmyjob.core.lmstudio import (
     probe_lmstudio_base_url,
     resolve_lmstudio_model_id,
 )
-from findmyjob.filefirst.advanced_models import install_recommended_split_profiles, split_model_defaults
+from findmyjob.filefirst.advanced_models import _split_model_defaults_cached, install_recommended_split_profiles, split_model_defaults
 from findmyjob.filefirst.workspace import FileWorkspace
 
 
@@ -124,6 +124,8 @@ def test_resolve_lmstudio_model_id_matches_normalized_catalog_ids() -> None:
 
 
 def test_split_model_defaults_resolves_live_catalog_aliases(monkeypatch) -> None:
+    _split_model_defaults_cached.cache_clear()
+
     def fake_probe(base_url, *, timeout=15.0, api_key=None):
         _ = (timeout, api_key)
         requested = str(base_url or '').strip() or LMSTUDIO_DEFAULT_HOST
@@ -146,6 +148,7 @@ def test_split_model_defaults_resolves_live_catalog_aliases(monkeypatch) -> None
 
 
 def test_install_recommended_split_profiles_uses_lmstudio_defaults(monkeypatch, tmp_path) -> None:
+    _split_model_defaults_cached.cache_clear()
     ws = FileWorkspace(tmp_path)
     ws.ensure()
 

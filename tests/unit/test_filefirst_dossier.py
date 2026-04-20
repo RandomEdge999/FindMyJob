@@ -23,4 +23,4 @@ def test_candidate_dossier_regeneration(tmp_path: Path) -> None:
 
     metadata = regenerate_candidate_dossier(ws)
     assert metadata['saved'] is True
-    assert ws.candidate_dossier_path.exists()
+    assert ws.load_candidate_dossier() is not None

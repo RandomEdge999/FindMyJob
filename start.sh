@@ -4,26 +4,8 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-UNAME_S="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-if [[ -z "${MSYSTEM:-}" && ( -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" || "$UNAME_S" == linux* ) ]]; then
-  GIT_BASH_ROOT="$ROOT"
-  if [[ "$GIT_BASH_ROOT" =~ ^/mnt/([a-zA-Z])/(.*)$ ]]; then
-    GIT_BASH_ROOT="/${BASH_REMATCH[1],,}/${BASH_REMATCH[2]}"
-  fi
-  GIT_BASH_ROOT="${GIT_BASH_ROOT//\\//}"
-  cat >&2 <<EOF
-Unsupported shell runtime: WSL/Linux bash.
-
-start.sh is supported only from Git Bash or from PowerShell via Git bash.exe.
-
-Use one of these launch paths instead:
-  1. Open Git Bash in the repo and run: ./start.sh
-  2. From PowerShell run: ./start.ps1
-  3. From PowerShell run:
-       & 'C:\\Program Files\\Git\\bin\\bash.exe' -lc "cd '$GIT_BASH_ROOT' && ./start.sh"
-EOF
-  exit 1
-fi
+# Cross-platform launcher: supports macOS, Linux, and Git Bash on Windows.
+# WSL is supported as a Linux runtime. Native Windows uses start.ps1 / start.bat.
 
 HOST="${FMJ_HOST:-127.0.0.1}"
 PORT="${FMJ_PORT:-8765}"
@@ -57,6 +39,32 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+bootstrap_python=()
+
+run_bootstrap() {
+  local script_path="$ROOT/scripts/bootstrap_env.py"
+  if [[ ${#bootstrap_python[@]} -eq 0 ]]; then
+    if [[ -f "$ROOT/.venv312/Scripts/python.exe" ]]; then
+      bootstrap_python=("$ROOT/.venv312/Scripts/python.exe")
+    elif [[ -f "$ROOT/.venv/Scripts/python.exe" ]]; then
+      bootstrap_python=("$ROOT/.venv/Scripts/python.exe")
+    elif command -v py >/dev/null 2>&1 && py -3.12 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1; then
+      bootstrap_python=(py -3.12)
+    elif command -v python.exe >/dev/null 2>&1 && python.exe -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1; then
+      bootstrap_python=(python.exe)
+    elif command -v python3.12 >/dev/null 2>&1; then
+      bootstrap_python=(python3.12)
+    elif command -v python >/dev/null 2>&1 && python -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' >/dev/null 2>&1; then
+      bootstrap_python=(python)
+    else
+      echo "Python 3.12 was not found. Install Python 3.12 or create .venv312 manually before launching FindMyJob." >&2
+      exit 1
+    fi
+  fi
+
+  "${bootstrap_python[@]}" "$script_path" --project-root "$ROOT"
+}
+
 # -- Choose Python from the virtual environment without sourcing activate --
 # Sourcing the Windows bash activate script under Git Bash can fail on `uname`.
 if [[ -f "$ROOT/.venv312/Scripts/python.exe" ]]; then
@@ -68,8 +76,19 @@ elif [[ -f "$ROOT/.venv312/bin/python" ]]; then
 elif [[ -f "$ROOT/.venv/bin/python" ]]; then
   PYTHON_BIN="$ROOT/.venv/bin/python"
 else
-  echo "Python 3.12 was not found in .venv312 or .venv. Create a repo-local Python 3.12 virtual environment first." >&2
-  exit 1
+  run_bootstrap
+  if [[ -f "$ROOT/.venv312/Scripts/python.exe" ]]; then
+    PYTHON_BIN="$ROOT/.venv312/Scripts/python.exe"
+  elif [[ -f "$ROOT/.venv/Scripts/python.exe" ]]; then
+    PYTHON_BIN="$ROOT/.venv/Scripts/python.exe"
+  elif [[ -f "$ROOT/.venv312/bin/python" ]]; then
+    PYTHON_BIN="$ROOT/.venv312/bin/python"
+  elif [[ -f "$ROOT/.venv/bin/python" ]]; then
+    PYTHON_BIN="$ROOT/.venv/bin/python"
+  else
+    echo "Bootstrap completed, but the repo-local Python environment was still not found under .venv312 or .venv." >&2
+    exit 1
+  fi
 fi
 echo "Python: $PYTHON_BIN"
 
@@ -78,6 +97,9 @@ if [[ "$PYTHON_VERSION" != "3.12" ]]; then
   echo "Unsupported Python at $PYTHON_BIN. FindMyJob requires a repo-local Python 3.12 virtual environment." >&2
   exit 1
 fi
+
+bootstrap_python=("$PYTHON_BIN")
+run_bootstrap
 
 if ! "$PYTHON_BIN" "$ROOT/scripts/lmstudio_preflight.py" --workspace "$ROOT"; then
   case "${REQUIRE_LMSTUDIO_PREFLIGHT,,}" in
@@ -90,6 +112,14 @@ if ! "$PYTHON_BIN" "$ROOT/scripts/lmstudio_preflight.py" --workspace "$ROOT"; th
       ;;
   esac
 fi
+
+BUILD_CMD=("$PYTHON_BIN" -m findmyjob build --workspace "$ROOT")
+if [[ "$SKIP_FRONTEND_BUILD" == "1" ]]; then
+  BUILD_CMD+=(--skip-frontend-build)
+  export SKIP_FRONTEND_BUILD=1
+fi
+
+"${BUILD_CMD[@]}"
 
 "$PYTHON_BIN" - <<'PY' "$HOST" "$PORT"
 import socket
@@ -112,18 +142,6 @@ with socket.socket(family, socket.SOCK_STREAM) as probe:
         )
         raise SystemExit(1)
 PY
-
-# -- Frontend build --
-if [[ "$SKIP_FRONTEND_BUILD" != "1" ]]; then
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "npm is required to build the React frontend." >&2
-    exit 1
-  fi
-  if [[ ! -d "$ROOT/frontend/node_modules" ]]; then
-    npm --prefix "$ROOT/frontend" install
-  fi
-  npm --prefix "$ROOT/frontend" run build
-fi
 
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 

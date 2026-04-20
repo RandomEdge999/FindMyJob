@@ -22,6 +22,7 @@ from findmyjob.core.enums import (
     WorkplaceType,
 )
 from findmyjob.core.env import load_workspace_dotenv
+from findmyjob.core.email_otp import inspect_email_otp_configuration
 from findmyjob.core.lmstudio import (
     LMSTUDIO_AUTO_MODEL,
     LMSTUDIO_DEFAULT_HOST,
@@ -129,6 +130,8 @@ class PersonalSettings(BaseModel):
 class ChatGPTDraftingSettings(BaseModel):
     enabled: bool = True
     gpt_url: str | None = "https://chatgpt.com/g/your-custom-resume-cover-letter-writer"
+    screening_url: str | None = ""
+    qa_url: str | None = ""
     completion_start_marker: str = "[[PDF_OUTPUT_READY]]"
     completion_end_marker: str = "[[PDF_OUTPUT_COMPLETE]]"
     profile_dir: str = ".fmj/browser/chatgpt-profile"
@@ -507,6 +510,7 @@ def inspect_app_config_payload(
     _validate_personal(root, config, report)
     _validate_chatgpt_drafting(root, config, report)
     _validate_autonomous(root, config, report)
+    _validate_email_otp(report)
     return config, report
 
 
@@ -593,6 +597,8 @@ def write_default_workspace_config(destination: Path, *, include_local_models: b
     chatgpt_tbl = table()
     chatgpt_tbl['enabled'] = True
     chatgpt_tbl['gpt_url'] = 'https://chatgpt.com/g/your-custom-resume-cover-letter-writer'
+    chatgpt_tbl['screening_url'] = ''
+    chatgpt_tbl['qa_url'] = ''
     chatgpt_tbl['completion_start_marker'] = '[[PDF_OUTPUT_READY]]'
     chatgpt_tbl['completion_end_marker'] = '[[PDF_OUTPUT_COMPLETE]]'
     chatgpt_tbl['profile_dir'] = '.fmj/browser/chatgpt-profile'
@@ -963,13 +969,54 @@ def _validate_autonomous(root: Path, config: AppConfig, report: ValidationReport
         if selected_source is None or not selected_source.enabled:
             report.add('blocked', 'autonomous.source_enabled', f'Autonomous mode requires `{source_name}` to be enabled.')
         elif not selected_source.submit_enabled:
-            report.add('warning', 'autonomous.submit', f'Autonomous dry-run mode active for `{source_name}`: submit is disabled. Jobs will be discovered, evaluated, and routed to review but not submitted.')
+            report.add('ok', 'autonomous.submit', f'Autonomous dry-run mode active for `{source_name}`: submit is disabled. Jobs will be discovered, evaluated, and routed to review but not submitted.')
+        elif source_name != 'greenhouse':
+            report.add(
+                'warning',
+                'autonomous.source_release_posture',
+                f'`autonomous.source` is set to `{source_name}`. The public beta release is Greenhouse-first; other sources remain present but are not the primary release-validated path.',
+            )
+        else:
+            report.add(
+                'warning',
+                'autonomous.live_submit',
+                'Live submit is enabled. This pre-launch path drives a real browser session and keeps the operator responsible for final review, mailbox access, and external side effects.',
+            )
         if autonomous.use_personal_presets and not config.personal.enabled:
             report.add('warning', 'autonomous.personal', 'Autonomous mode is configured to use personal presets, but personal onboarding is not enabled.')
         bound_roles = {profile.role.value for profile in config.models.values()}
         missing = [role for role in ('writer', 'question_answerer', 'classifier') if role not in bound_roles]
         if missing:
             report.add('warning', 'autonomous.model_roles', 'Autonomous mode is missing one or more preferred AI roles.', detail=', '.join(missing))
+
+
+def _validate_email_otp(report: ValidationReport) -> None:
+    audit = inspect_email_otp_configuration()
+    if not audit['enabled']:
+        return
+
+    if audit['status'] == 'misconfigured':
+        missing = ', '.join(str(item) for item in audit.get('missing') or []) or 'required IMAP settings'
+        report.add(
+            'blocked',
+            'email_otp.configuration',
+            'Greenhouse email OTP is enabled but not fully configured.',
+            detail=f'Missing or unresolved settings: {missing}.',
+            hint='Set the required environment variables locally or disable `FMJ_EMAIL_OTP_ENABLED` for this release path.',
+        )
+    else:
+        report.add(
+            'warning',
+            'email_otp.enabled',
+            'Greenhouse email OTP is enabled. This optional helper reads live IMAP credentials from the local environment and is intended only for operator-controlled pre-launch use.',
+        )
+
+    for warning in audit.get('warnings') or []:
+        report.add(
+            'warning',
+            'email_otp.runtime',
+            str(warning),
+        )
 
 
 def _is_http_url(value: str) -> bool:

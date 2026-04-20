@@ -97,6 +97,14 @@ def seed_profile(runtime: AppRuntime) -> None:
                 sensitivity=Sensitivity.LOW,
             )
         )
+        repo.upsert_fact(
+            ProfileFact(
+                fact_id="location-1",
+                kind=FactKind.LOCATION,
+                payload={"city": "San Francisco", "region_code": "CA", "country_code": "US", "display": "San Francisco, CA"},
+                sensitivity=Sensitivity.LOW,
+            )
+        )
 
 
 @pytest.fixture()
@@ -133,6 +141,8 @@ def greenhouse_get(monkeypatch):
             return greenhouse_response(url, discovery_payload)
         if url == "https://boards-api.greenhouse.io/v1/boards/acme/jobs/123456":
             return greenhouse_response(url, question_payload)
+        if url.startswith("https://api.lever.co/"):
+            return httpx.Response(200, json=[], request=httpx.Request("GET", url))
         raise AssertionError(f"Unexpected GET {url}")
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)

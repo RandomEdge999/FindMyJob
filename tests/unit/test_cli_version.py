@@ -30,3 +30,22 @@ def test_init_cli_seeds_default_templates(tmp_path: Path) -> None:
     assert (tmp_path / ".fmj" / "config.toml").exists()
     assert (tmp_path / "templates" / "typst" / "resume.typ").exists()
     assert (tmp_path / "templates" / "typst" / "cover_letter.typ").exists()
+
+
+def test_bootstrap_cli_json_reports_repo_environment(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "findmyjob.cli.main.bootstrap_repo_environment",
+        lambda **kwargs: {
+            "status": "ready",
+            "project_root": str(kwargs["project_root"]),
+            "venv_python": str(tmp_path / ".venv312" / "Scripts" / "python.exe"),
+            "summary": "Repo-local Python 3.12 environment ready.",
+        },
+    )
+
+    result = runner.invoke(app, ["bootstrap", "--workspace", str(tmp_path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "ready"
+    assert payload["project_root"] == str(tmp_path)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 from findmyjob.core.lmstudio import LMSTUDIO_AUTO_MODEL
-from findmyjob.filefirst.models import AnswerMemoryEntry
+from findmyjob.filefirst.models import AnswerMemoryEntry, FileFact
 from findmyjob.filefirst.portal_defaults import BOOTSTRAP_PORTAL_BOARDS, bootstrap_board_targets
 from findmyjob.filefirst.models import InboxJob
 from findmyjob.filefirst.workspace import FileWorkspace
@@ -158,6 +158,37 @@ def test_filefirst_workspace_single_local_user_profile_drives_profile_facts_answ
     assert any(item.canonical_question == 'Are you fluent in English?' for item in answers)
     assert cv.startswith('# Private CV')
     assert ws.user_profile_surface()['mode'] == 'local_user_profile'
+
+
+def test_filefirst_workspace_merges_basic_profile_facts_with_existing_local_facts(tmp_path) -> None:
+    ws = FileWorkspace(tmp_path)
+    ws.ensure()
+    ws.save_facts(
+        [
+            FileFact(fact_id='contact.primary', kind='contact', payload={'name': 'Old User', 'email': 'old@example.com'}),
+            FileFact(fact_id='work.primary', kind='work', payload={'summary': 'Built local automation tooling.'}),
+        ]
+    )
+    ws.save_user_profile(
+        {
+            'candidate': {
+                'name': 'New User',
+                'email': 'new@example.com',
+                'location': 'Austin, TX, US',
+            },
+            'authorization': {
+                'is_authorized': True,
+                'requires_future_sponsorship': False,
+            },
+        }
+    )
+
+    facts = ws.load_facts()
+
+    assert any(fact.kind == 'contact' and fact.payload.get('email') == 'new@example.com' for fact in facts)
+    assert any(fact.kind == 'authorization' and fact.payload.get('is_authorized') is True for fact in facts)
+    assert any(fact.kind == 'work' and fact.fact_id == 'work.primary' for fact in facts)
+    assert not any(fact.kind == 'contact' and fact.payload.get('email') == 'old@example.com' for fact in facts)
 
 
 def test_personal_saves_write_to_local_overrides_instead_of_tracked_sample_files(tmp_path) -> None:

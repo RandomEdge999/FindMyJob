@@ -95,6 +95,7 @@ def test_inspect_readiness_reports_ready_state_for_ready_workspace(monkeypatch, 
         },
     )
     monkeypatch.setattr('findmyjob.core.runtime.keyring_status', lambda: {'available': True, 'backend': 'test.backend', 'detail': None})
+    monkeypatch.setattr('findmyjob.core.config.inspect_email_otp_configuration', lambda: {'enabled': False})
 
     report = inspect_readiness(tmp_path, check_models=False, check_browser=True, check_typst=True)
 
@@ -105,7 +106,7 @@ def test_inspect_readiness_reports_ready_state_for_ready_workspace(monkeypatch, 
     assert not any(finding.status == 'warning' for finding in report.findings)
 
 
-def test_inspect_readiness_blocks_when_greenhouse_launch_path_is_missing(tmp_path: Path) -> None:
+def test_inspect_readiness_blocks_when_greenhouse_launch_path_is_missing(monkeypatch, tmp_path: Path) -> None:
     config_path = workspace_config_file(tmp_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     write_default_workspace_config(config_path)
@@ -117,7 +118,9 @@ def test_inspect_readiness_blocks_when_greenhouse_launch_path_is_missing(tmp_pat
     greenhouse['seed_urls'] = []
     greenhouse['seed_domains'] = []
     greenhouse['use_builtin_board_universe'] = False
+    greenhouse['submit_enabled'] = True
     config_path.write_text(doc.as_string(), encoding='utf-8')
+    monkeypatch.setattr('findmyjob.core.config.inspect_email_otp_configuration', lambda: {'enabled': False})
 
     report = inspect_readiness(tmp_path, check_models=False, check_browser=False, check_typst=False)
 

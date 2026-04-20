@@ -258,17 +258,19 @@ def inspect_readiness(
 
     router = ModelRouter(config)
     inspection = router.inspect_profiles()
-    missing_roles = inspection["missing_required_roles"]
-    if missing_roles:
-        report.add("warning", "models.roles", "Required model roles are not fully bound.", detail=", ".join(missing_roles))
-    elif inspection["profiles"]:
-        report.add("ok", "models.roles", "Required model roles are bound.")
-    else:
-        report.add("warning", "models.roles", "No model profiles are configured.")
 
-    for profile in inspection["profiles"]:
-        if profile["status"] == "blocked":
-            report.add("warning", f"models.{profile['name']}", f"Model profile `{profile['name']}` is not ready.", detail="; ".join(profile["issues"]))
+    if check_models:
+        missing_roles = inspection["missing_required_roles"]
+        if missing_roles:
+            report.add("warning", "models.roles", "Required model roles are not fully bound.", detail=", ".join(missing_roles))
+        elif inspection["profiles"]:
+            report.add("ok", "models.roles", "Required model roles are bound.")
+        else:
+            report.add("warning", "models.roles", "No model profiles are configured.")
+
+        for profile in inspection["profiles"]:
+            if profile["status"] == "blocked":
+                report.add("warning", f"models.{profile['name']}", f"Model profile `{profile['name']}` is not ready.", detail="; ".join(profile["issues"]))
 
     if check_models:
         process_profiles = [profile for profile in inspection["profiles"] if profile["transport"] == "process"]
